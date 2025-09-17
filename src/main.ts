@@ -20,7 +20,7 @@ async function bootstrap() {
 
   const port = process.env.PORT || 3000;
   await app.listen(port);
-  console.log(`Server running: http://localhost:${port}`);
-  console.log(`Swagger docs: http://localhost:${port}/api`);
+  console.log(`Server running: https://attendance-backend-pz8g.onrender.com:${port}`);
+  console.log(`Swagger docs: https://attendance-backend-pz8g.onrender.com:${port}/api`);
 }
 bootstrap();
