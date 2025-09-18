@@ -100,30 +100,41 @@ async createUser(payload: CreateUserDto, file?: Express.Multer.File) {
 
 
   // Login user with anon client, verify profile & return role
-  async login(email: string, password: string) {
-    const supa = this.supabase.getClient();
+async login(email: string, password: string, expectedRole: 'admin' | 'user') {
+  const supa = this.supabase.getClient();
 
-    // Sign in with password (anon client)
-    const { data, error } = await supa.auth.signInWithPassword({ email, password });
-    if (error) {
-      throw new UnauthorizedException('Invalid login credentials: ' + error.message);
-    }
-
-    // Fetch user profile from users table
-    const { data: profile, error: profileError } = await supa
-      .from('users')
-      .select('id, name, email, profile_url, role')
-      .eq('email', email)
-      .single();
-
-    if (profileError) throw new UnauthorizedException('User logged in but profile not found');
-
-    // Compose and return login result
-    return {
-      ...data,
-      profile,
-      role: data.user?.user_metadata?.role || profile.role || 'user',
-      id: profile.id,
-    };
+  // 1. Sign in with password
+  const { data, error } = await supa.auth.signInWithPassword({ email, password });
+  if (error) {
+    throw new UnauthorizedException('Invalid login credentials: ' + error.message);
   }
+
+  // 2. Fetch user profile
+  const { data: profile, error: profileError } = await supa
+    .from('users')
+    .select('id, name, email, profile_url, role')
+    .eq('email', email)
+    .single();
+
+  if (profileError) {
+    throw new UnauthorizedException('User logged in but profile not found');
+  }
+
+  // 3. Determine role from metadata or fallback to profile
+  const role = data.user?.user_metadata?.role || profile.role || 'user';
+
+  // 4. Check expected role
+  if (role !== expectedRole) {
+    throw new UnauthorizedException(`Access denied: ${expectedRole}s only`);
+  }
+
+  // 5. Return result
+  return {
+    ...data,
+    profile,
+    role,
+    id: profile.id,
+  };
+}
+
 }

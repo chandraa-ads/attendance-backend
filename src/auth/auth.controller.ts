@@ -30,20 +30,12 @@ export class AuthController {
 
  @Post('login/admin')
 async loginAdmin(@Body() body: LoginDto) {
-  const loginResult = await this.authService.login(body.email, body.password);
-  if (loginResult.role !== 'admin') {
-    throw new UnauthorizedException('Access denied: Admins only');
-  }
-  return loginResult;
+  return this.authService.login(body.email, body.password, 'admin');
 }
 
 @Post('login/user')
 async loginUser(@Body() body: LoginDto) {
-  const loginResult = await this.authService.login(body.email, body.password);
-  if (loginResult.role !== 'user') {
-    throw new UnauthorizedException('Access denied: Users only');
-  }
-  return loginResult;
+  return this.authService.login(body.email, body.password, 'user');
 }
 
 
