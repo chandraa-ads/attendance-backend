@@ -8,10 +8,10 @@ async function bootstrap() {
   const app = await NestFactory.create(AppModule);
 
   app.enableCors({
-    origin: ['http://localhost:5173', 'https://your-frontend-on-vercel.vercel.app'], // ← Replace with your frontend URL
+    origin: '*',
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
-    credentials: true, // if using cookies or sessions
+    credentials: true,
   });
 
   const config = new DocumentBuilder()
@@ -24,9 +24,9 @@ async function bootstrap() {
   const document = SwaggerModule.createDocument(app, config);
   SwaggerModule.setup('api', app, document);
 
-  const port = process.env.PORT || 3000;
+  const port = process.env.PORT || 3000; // Local -> 3000, Render -> auto PORT
   await app.listen(port);
-  console.log(`Server running: http://localhost:${port}`);
-  console.log(`Swagger docs: http://localhost:${port}/api`);
+  console.log(`✅ Server running: http://localhost:${port}`);
+  console.log(`✅ Swagger docs: http://localhost:${port}/api`);
 }
 bootstrap();
