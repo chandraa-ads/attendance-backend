@@ -16,6 +16,21 @@ export class AttendanceService {
     return d.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
   }
 
+  // Format duration between two dates as HH:mm:ss
+  private formatDuration(start: Date | string, end: Date | string): string {
+    const startTime = new Date(start).getTime();
+    const endTime = new Date(end).getTime();
+    const totalSeconds = Math.floor((endTime - startTime) / 1000);
+
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+
+    return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(
+      seconds,
+    ).padStart(2, '0')}`;
+  }
+
   async checkIn(userId: string) {
     if (!userId) throw new BadRequestException('userId required');
 
@@ -32,12 +47,10 @@ export class AttendanceService {
         .single();
 
       if (exErr && exErr.code !== 'PGRST116') {
-        // PGRST116 means no rows found - ignore this error
         throw exErr;
       }
 
       if (existing) {
-        // User already checked in - add IST formatted time and return
         return {
           ...existing,
           check_in_ist: this.toIST(existing.check_in),
@@ -45,7 +58,6 @@ export class AttendanceService {
         };
       }
 
-      // Insert new attendance record with current UTC time
       const { data, error } = await supa
         .from('attendance')
         .insert([{ user_id: userId, date: today, check_in: new Date() }])
@@ -54,7 +66,6 @@ export class AttendanceService {
 
       if (error) throw error;
 
-      // Add IST formatted time before returning
       return {
         ...data,
         check_in_ist: this.toIST(data.check_in),
@@ -66,6 +77,7 @@ export class AttendanceService {
     }
   }
 
+  // ✅ UPDATED checkOut method with HH:mm:ss formatting
   async checkOut(userId: string) {
     if (!userId) throw new BadRequestException('userId required');
 
@@ -86,34 +98,38 @@ export class AttendanceService {
       }
 
       if (row.check_out) {
-        // Already checked out - add IST formatted times and return
         return {
           ...row,
           check_in_ist: this.toIST(row.check_in),
           check_out_ist: this.toIST(row.check_out),
+          total_time_formatted: this.formatDuration(row.check_in, row.check_out),
         };
       }
 
-      // Calculate total minutes between check_in and now (UTC)
       const checkInTime = new Date(row.check_in).getTime();
       const checkOutTime = Date.now();
-      const minutes = Number(((checkOutTime - checkInTime) / (1000 * 60)).toFixed(2));
+      const diffMs = checkOutTime - checkInTime;
 
-      // Update attendance record with check_out and total_time_minutes
+      const totalMinutes = Number((diffMs / (1000 * 60)).toFixed(2));
+      const totalTimeFormatted = this.formatDuration(row.check_in, new Date(checkOutTime));
+
       const { data, error } = await supa
         .from('attendance')
-        .update({ check_out: new Date(), total_time_minutes: minutes })
+        .update({
+          check_out: new Date(checkOutTime),
+          total_time_minutes: totalMinutes,
+        })
         .eq('id', row.id)
         .select()
         .single();
 
       if (error) throw error;
 
-      // Add IST formatted times before returning
       return {
         ...data,
         check_in_ist: this.toIST(data.check_in),
         check_out_ist: this.toIST(data.check_out),
+        total_time_formatted: totalTimeFormatted,
       };
     } catch (err) {
       console.error('Check-out error:', err);
@@ -121,7 +137,6 @@ export class AttendanceService {
     }
   }
 
-  // Get attendance records for a user, optionally filtered by date range
   async getMyAttendance(userId: string, from?: string, to?: string) {
     if (!userId) throw new BadRequestException('userId required');
 
@@ -150,7 +165,6 @@ export class AttendanceService {
     }
   }
 
-  // Admin method: get all attendance records with optional filters
   async getAll(filters: {
     date?: string;
     name?: string;
@@ -182,7 +196,6 @@ export class AttendanceService {
     }
   }
 
-  // Get attendance filtered by employeeId by client-side filtering on joined users table
   async getAttendanceByEmployeeId(employeeId: string) {
     if (!employeeId) {
       throw new BadRequestException('Employee ID is required');
@@ -200,7 +213,6 @@ export class AttendanceService {
         throw new BadRequestException('Failed to fetch data: ' + error.message);
       }
 
-      // Client-side filter by employee_id
       const filtered = data.filter(
         (record) => record.users?.employee_id?.toString() === employeeId.toString(),
       );
