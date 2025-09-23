@@ -3,7 +3,7 @@ import { SupabaseService } from '../supabase/supabase.service';
 
 @Injectable()
 export class AttendanceService {
-  constructor(private readonly supabase: SupabaseService) {}
+  constructor(private readonly supabase: SupabaseService) { }
 
   // Helper to get today's date in YYYY-MM-DD format
   private todayDate(): string {
@@ -158,7 +158,12 @@ export class AttendanceService {
         throw error;
       }
 
-      return data;
+      return data.map(({ total_time_minutes, ...rest }) => ({
+        ...rest,
+        total_time_formatted:
+          rest.check_in && rest.check_out ? this.formatDuration(rest.check_in, rest.check_out) : null,
+      }));
+
     } catch (err) {
       console.error('getMyAttendance error:', err);
       throw err;
@@ -189,7 +194,11 @@ export class AttendanceService {
 
       if (error) throw error;
 
-      return data;
+      return data.map(({ total_time_minutes, ...rest }) => ({
+        ...rest,
+        total_time_formatted:
+          rest.check_in && rest.check_out ? this.formatDuration(rest.check_in, rest.check_out) : null,
+      }));
     } catch (err) {
       console.error('getAll attendance error:', err);
       throw err;
@@ -217,7 +226,11 @@ export class AttendanceService {
         (record) => record.users?.employee_id?.toString() === employeeId.toString(),
       );
 
-      return filtered;
+      return filtered.map(({ total_time_minutes, ...rest }) => ({
+        ...rest,
+        total_time_formatted:
+          rest.check_in && rest.check_out ? this.formatDuration(rest.check_in, rest.check_out) : null,
+      }));
     } catch (err) {
       console.error('getAttendanceByEmployeeId error:', err);
       throw err;
