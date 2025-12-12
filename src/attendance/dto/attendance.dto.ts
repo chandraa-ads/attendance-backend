@@ -1,60 +1,144 @@
-import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsNotEmpty, IsOptional, IsString } from 'class-validator';
+import { ApiProperty } from '@nestjs/swagger';
+import { IsString, IsOptional, IsBoolean, IsDateString, IsArray, ValidateNested } from 'class-validator';
+import { Type } from 'class-transformer';
 
 export class CheckInDto {
-  @ApiProperty({ example: 'uuid-of-user', description: 'User ID of the employee' })
+  @ApiProperty()
   @IsString()
-  @IsNotEmpty()
   userId: string;
 }
 
 export class CheckOutDto {
-  @ApiProperty({ example: 'uuid-of-user', description: 'User ID of the employee' })
+  @ApiProperty()
   @IsString()
-  @IsNotEmpty()
   userId: string;
 }
 
 export class MyAttendanceQueryDto {
-  @ApiProperty({ example: 'uuid-of-user', description: 'User ID of the employee' })
+  @ApiProperty()
   @IsString()
-  @IsNotEmpty()
   userId: string;
 
-  @ApiPropertyOptional({ example: '2025-09-01', description: 'From date (YYYY-MM-DD)' })
+  @ApiProperty({ required: false })
   @IsOptional()
-  @IsString()
+  @IsDateString()
   from?: string;
 
-  @ApiPropertyOptional({ example: '2025-09-15', description: 'To date (YYYY-MM-DD)' })
+  @ApiProperty({ required: false })
   @IsOptional()
-  @IsString()
+  @IsDateString()
   to?: string;
 }
 
 export class AllAttendanceQueryDto {
-   @ApiPropertyOptional({ example: '2025-09-15', description: 'Filter attendance by date (YYYY-MM-DD)' })
+  @ApiProperty({ required: false })
   @IsOptional()
   @IsString()
   date?: string;
 
-  @ApiPropertyOptional({ example: 'John', description: 'Filter by user name (partial match)' })
+  @ApiProperty({ required: false })
   @IsOptional()
   @IsString()
   name?: string;
 
-  @ApiPropertyOptional({ example: 'EMP123', description: 'Filter by employee ID (partial match)' })
+  @ApiProperty({ required: false })
   @IsOptional()
   @IsString()
   employeeId?: string;
 
-  @ApiPropertyOptional({ example: '08:00', description: 'Filter check-in start time (HH:mm)' })
+  @ApiProperty({ required: false })
   @IsOptional()
   @IsString()
   checkInFrom?: string;
 
-  @ApiPropertyOptional({ example: '17:00', description: 'Filter check-out end time (HH:mm)' })
+  @ApiProperty({ required: false })
   @IsOptional()
   @IsString()
   checkOutTo?: string;
+
+  @ApiProperty({ required: false })
+  @IsOptional()
+  @IsString()
+  status?: string;
+}
+
+// New DTO for admin manual attendance
+export class ManualAttendanceDto {
+  @ApiProperty({ description: 'User ID to mark attendance for' })
+  @IsString()
+  userId: string;
+
+  @ApiProperty({ description: 'Date in YYYY-MM-DD format' })
+  @IsString()
+  date: string;
+
+  @ApiProperty({ description: 'Check-in time (HH:mm format, 24hr)', required: false })
+  @IsOptional()
+  @IsString()
+  checkIn?: string;
+
+  @ApiProperty({ description: 'Check-out time (HH:mm format, 24hr)', required: false })
+  @IsOptional()
+  @IsString()
+  checkOut?: string;
+
+  @ApiProperty({ description: 'Mark as absent (no check-in/out)', required: false, default: false })
+  @IsOptional()
+  @IsBoolean()
+  isAbsent?: boolean;
+
+  @ApiProperty({ description: 'Reason for absence', required: false })
+  @IsOptional()
+  @IsString()
+  absenceReason?: string;
+}
+
+// DTO for bulk attendance update
+export class BulkAttendanceDto {
+  @ApiProperty({
+    description: 'Array of attendance records to update',
+    type: [ManualAttendanceDto]
+  })
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => ManualAttendanceDto)
+  records: ManualAttendanceDto[];
+}
+
+// DTO for bulk action
+export class BulkActionDto {
+  @ApiProperty({ description: 'Action to perform: absent or present' })
+  @IsString()
+  action: string;
+
+  @ApiProperty({ description: 'Date in YYYY-MM-DD format' })
+  @IsString()
+  date: string;
+
+  @ApiProperty({ description: 'Array of user IDs', type: [String] })
+  @IsArray()
+  @IsString({ each: true })
+  userIds: string[];
+
+  @ApiProperty({ description: 'Reason for absence (if action is absent)', required: false })
+  @IsOptional()
+  @IsString()
+  reason?: string;
+}
+
+// DTO for attendance summary
+export class AttendanceSummaryQueryDto {
+  @ApiProperty({ description: 'User ID' })
+  @IsString()
+  userId: string;
+
+  @ApiProperty({ description: 'Month (1-12)', required: false })
+  @IsOptional()
+  @IsString()
+  month?: string;
+
+  @ApiProperty({ description: 'Year (e.g., 2024)', required: false })
+  @IsOptional()
+  @IsString()
+  year?: string;
 }
