@@ -307,316 +307,424 @@ export class AttendanceService {
     }
   }
 
-  async getAll(filters: {
-    date?: string;
-    name?: string;
-    employeeId?: string;
-    checkInFrom?: string;
-    checkOutTo?: string;
-    status?: string;
-  }) {
-    try {
-      const supa = this.supabase.getAdminClient();
+ async getAll(filters: {
+  date?: string;
+  name?: string;
+  employeeId?: string;
+  checkInFrom?: string;
+  checkOutTo?: string;
+  status?: string;
+}) {
+  try {
+    const supa = this.supabase.getAdminClient();
 
-      let query = supa
-        .from('attendance')
-        .select('*, users!inner(id, name, email, employee_id, designation, profile_url, role)');
+    // FIX: Specify the exact relationship using users!attendance_user_id_fkey
+    let query = supa
+      .from('attendance')
+      .select(`
+        *,
+        users!attendance_user_id_fkey (
+          id, name, email, employee_id, designation, profile_url, role
+        )
+      `);
 
-      if (filters.date) {
-        const date = new Date(filters.date);
-        if (isNaN(date.getTime())) {
-          throw new BadRequestException('Invalid date format');
-        }
-        query = query.eq('date', filters.date);
+    if (filters.date) {
+      const date = new Date(filters.date);
+      if (isNaN(date.getTime())) {
+        throw new BadRequestException('Invalid date format');
       }
-      
-      if (filters.name) {
-        query = query.ilike('users.name', `%${filters.name}%`);
-      }
-      
-      if (filters.employeeId) {
-        query = query.ilike('users.employee_id', `%${filters.employeeId}%`);
-      }
-      
-      if (filters.checkInFrom) {
-        const checkInDate = filters.date || this.todayDate();
-        query = query.gte('check_in', `${checkInDate}T${filters.checkInFrom}:00Z`);
-      }
-      
-      if (filters.checkOutTo) {
-        const checkOutDate = filters.date || this.todayDate();
-        query = query.lte('check_out', `${checkOutDate}T${filters.checkOutTo}:00Z`);
-      }
+      query = query.eq('date', filters.date);
+    }
+    
+    if (filters.name) {
+      // FIX: Specify the relationship in the filter too
+      query = query.ilike('users!attendance_user_id_fkey.name', `%${filters.name}%`);
+    }
+    
+    if (filters.employeeId) {
+      query = query.ilike('users!attendance_user_id_fkey.employee_id', `%${filters.employeeId}%`);
+    }
+    
+    if (filters.checkInFrom) {
+      const checkInDate = filters.date || this.todayDate();
+      query = query.gte('check_in', `${checkInDate}T${filters.checkInFrom}:00Z`);
+    }
+    
+    if (filters.checkOutTo) {
+      const checkOutDate = filters.date || this.todayDate();
+      query = query.lte('check_out', `${checkOutDate}T${filters.checkOutTo}:00Z`);
+    }
 
-      const { data, error } = await query.order('date', { ascending: false });
+    const { data, error } = await query.order('date', { ascending: false });
 
-      if (error) {
-        console.error('Error fetching all attendance:', error);
-        throw new InternalServerErrorException('Failed to fetch attendance records');
-      }
-
-      // Apply status filter if provided
-      let filteredData = data;
-      if (filters.status && filters.status.trim() !== '') {
-        filteredData = data.filter(record => {
-          const status = this.getStatus(record);
-          return status.toLowerCase().replace(' ', '-') === filters.status!.toLowerCase();
-        });
-      }
-
-      return filteredData.map((record) => ({
-        ...record,
-        check_in_ist: this.toIST(record.check_in),
-        check_out_ist: this.toIST(record.check_out),
-        total_time_formatted: record.check_in && record.check_out 
-          ? this.formatDuration(record.check_in, record.check_out) 
-          : (record.is_absent ? '00:00:00' : null),
-        status: this.getStatus(record),
-        manual_entry: record.manual_entry || false,
-        user_info: {
-          id: record.users?.id,
-          name: record.users?.name,
-          email: record.users?.email,
-          employee_id: record.users?.employee_id,
-          designation: record.users?.designation,
-          profile_url: record.users?.profile_url,
-          role: record.users?.role
-        }
-      }));
-    } catch (err) {
-      console.error('getAll attendance error:', err);
-      if (err instanceof BadRequestException) throw err;
+    if (error) {
+      console.error('Error fetching all attendance:', error);
       throw new InternalServerErrorException('Failed to fetch attendance records');
     }
+
+    // Apply status filter if provided
+    let filteredData = data;
+    if (filters.status && filters.status.trim() !== '') {
+      filteredData = data.filter(record => {
+        const status = this.getStatus(record);
+        return status.toLowerCase().replace(' ', '-') === filters.status!.toLowerCase();
+      });
+    }
+
+    return filteredData.map((record) => ({
+      ...record,
+      check_in_ist: this.toIST(record.check_in),
+      check_out_ist: this.toIST(record.check_out),
+      total_time_formatted: record.check_in && record.check_out 
+        ? this.formatDuration(record.check_in, record.check_out) 
+        : (record.is_absent ? '00:00:00' : null),
+      status: this.getStatus(record),
+      manual_entry: record.manual_entry || false,
+      user_info: {
+        id: record.users?.id,
+        name: record.users?.name,
+        email: record.users?.email,
+        employee_id: record.users?.employee_id,
+        designation: record.users?.designation,
+        profile_url: record.users?.profile_url,
+        role: record.users?.role
+      }
+    }));
+  } catch (err) {
+    console.error('getAll attendance error:', err);
+    if (err instanceof BadRequestException) throw err;
+    throw new InternalServerErrorException('Failed to fetch attendance records');
+  }
+}
+
+async getAttendanceByEmployeeId(employeeId: string) {
+  if (!employeeId) {
+    throw new BadRequestException('Employee ID is required');
   }
 
-  async getAttendanceByEmployeeId(employeeId: string) {
-    if (!employeeId) {
-      throw new BadRequestException('Employee ID is required');
+  try {
+    const supa = this.supabase.getAdminClient();
+
+    // FIX: Specify the exact relationship
+    const { data, error } = await supa
+      .from('attendance')
+      .select(`
+        *,
+        users!attendance_user_id_fkey (
+          id, name, employee_id, designation
+        )
+      `)
+      .order('date', { ascending: false });
+
+    if (error) {
+      console.error('Error fetching attendance by employee ID:', error);
+      throw new InternalServerErrorException('Failed to fetch data');
     }
 
-    try {
-      const supa = this.supabase.getAdminClient();
+    const filtered = data.filter(
+      (record) => record.users?.employee_id?.toString() === employeeId.toString(),
+    );
 
-      const { data, error } = await supa
-        .from('attendance')
-        .select('*, users!inner(id, name, employee_id, designation)')
-        .order('date', { ascending: false });
-
-      if (error) {
-        console.error('Error fetching attendance by employee ID:', error);
-        throw new InternalServerErrorException('Failed to fetch data');
+    return filtered.map((record) => ({
+      ...record,
+      check_in_ist: this.toIST(record.check_in),
+      check_out_ist: this.toIST(record.check_out),
+      total_time_formatted: record.check_in && record.check_out 
+        ? this.formatDuration(record.check_in, record.check_out) 
+        : (record.is_absent ? '00:00:00' : null),
+      status: this.getStatus(record),
+      user_info: {
+        name: record.users?.name,
+        employee_id: record.users?.employee_id,
+        designation: record.users?.designation
       }
+    }));
+  } catch (err) {
+    console.error('getAttendanceByEmployeeId error:', err);
+    if (err instanceof BadRequestException) throw err;
+    throw new InternalServerErrorException('Failed to fetch attendance by employee ID');
+  }
+}
 
-      const filtered = data.filter(
-        (record) => record.users?.employee_id?.toString() === employeeId.toString(),
-      );
+async manualAttendance(dto: ManualAttendanceDto) {
+  const { userId, date, checkIn, checkOut, isAbsent = false, absenceReason } = dto;
 
-      return filtered.map((record) => ({
-        ...record,
-        check_in_ist: this.toIST(record.check_in),
-        check_out_ist: this.toIST(record.check_out),
-        total_time_formatted: record.check_in && record.check_out 
-          ? this.formatDuration(record.check_in, record.check_out) 
-          : (record.is_absent ? '00:00:00' : null),
-        status: this.getStatus(record),
-        user_info: {
-          name: record.users?.name,
-          employee_id: record.users?.employee_id,
-          designation: record.users?.designation
-        }
-      }));
-    } catch (err) {
-      console.error('getAttendanceByEmployeeId error:', err);
-      if (err instanceof BadRequestException) throw err;
-      throw new InternalServerErrorException('Failed to fetch attendance by employee ID');
-    }
+  console.log('=== MANUAL ATTENDANCE START ===');
+  console.log('Input DTO:', JSON.stringify(dto, null, 2));
+
+  if (!userId || !date) {
+    throw new BadRequestException('userId and date are required');
   }
 
-  async manualAttendance(dto: ManualAttendanceDto) {
-    const { userId, date, checkIn, checkOut, isAbsent = false, absenceReason } = dto;
+  // Validate date format (YYYY-MM-DD)
+  const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+  if (!dateRegex.test(date)) {
+    throw new BadRequestException('Date must be in YYYY-MM-DD format');
+  }
 
-    if (!userId || !date) {
-      throw new BadRequestException('userId and date are required');
+  // Check if date is not in the future
+  const today = this.todayDate();
+  if (date > today) {
+    throw new BadRequestException('Cannot mark attendance for future dates');
+  }
+
+  try {
+    const supa = this.supabase.getAdminClient();
+    console.log('Supabase client initialized');
+
+    // Verify user exists
+    console.log(`Looking up user: ${userId}`);
+    const { data: userData, error: userErr } = await supa
+      .from('users')
+      .select('id, name, employee_id, designation')
+      .eq('id', userId)
+      .single();
+
+    console.log('User lookup result:', { data: userData, error: userErr });
+
+    if (userErr || !userData) {
+      console.error('User not found error:', userErr);
+      throw new BadRequestException('User not found');
     }
 
-    // Validate date format (YYYY-MM-DD)
-    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
-    if (!dateRegex.test(date)) {
-      throw new BadRequestException('Date must be in YYYY-MM-DD format');
+    console.log('User found:', userData);
+
+    // Check if attendance already exists for this user on this date
+    console.log(`Checking existing attendance for user ${userId} on date ${date}`);
+    const { data: existing, error: exErr } = await supa
+      .from('attendance')
+      .select('*')
+      .eq('user_id', userId)
+      .eq('date', date)
+      .single();
+
+    console.log('Existing record check:', { existing, error: exErr });
+
+    if (exErr && exErr.code !== 'PGRST116') {
+      console.error('Error checking existing record:', exErr);
+      throw new InternalServerErrorException('Error checking existing attendance');
     }
 
-    // Check if date is not in the future
-    const today = this.todayDate();
-    if (date > today) {
-      throw new BadRequestException('Cannot mark attendance for future dates');
-    }
+    let checkInDateTime: Date | null = null;
+    let checkOutDateTime: Date | null = null;
+    let totalMinutes = 0;
+    let totalTimeFormatted: string | null = null;
 
-    try {
-      const supa = this.supabase.getAdminClient();
-
-      // Verify user exists
-      const { data: userData, error: userErr } = await supa
-        .from('users')
-        .select('id, name, employee_id, designation')
-        .eq('id', userId)
-        .single();
-
-      if (userErr || !userData) {
-        throw new BadRequestException('User not found');
+    if (isAbsent) {
+      console.log('Marking as ABSENT');
+      
+      // Validate that check-in/out are not provided when marking as absent
+      if (checkIn || checkOut) {
+        throw new BadRequestException('Cannot provide check-in/out times when marking as absent');
       }
 
-      // Check if attendance already exists for this user on this date
-      const { data: existing, error: exErr } = await supa
-        .from('attendance')
-        .select('*')
-        .eq('user_id', userId)
-        .eq('date', date)
-        .single();
-
-      if (exErr && exErr.code !== 'PGRST116') {
-        console.error('Error checking existing record:', exErr);
-        throw new InternalServerErrorException('Error checking existing attendance');
+      if (!absenceReason || absenceReason.trim() === '') {
+        throw new BadRequestException('Absence reason is required when marking as absent');
       }
 
-      let checkInDateTime: Date | null = null;
-      let checkOutDateTime: Date | null = null;
-      let totalMinutes = 0;
-      let totalTimeFormatted: string | null = null;
+      // Mark as absent - create/update record with null check-in/out
+      const attendanceData = {
+        user_id: userId,
+        date,
+        check_in: null,
+        check_out: null,
+        is_absent: true,
+        absence_reason: absenceReason.trim(),
+        total_time_minutes: 0,
+        manual_entry: true,
+        updated_at: new Date().toISOString() // Use ISO string
+      };
 
-      if (isAbsent) {
-        // Validate that check-in/out are not provided when marking as absent
-        if (checkIn || checkOut) {
-          throw new BadRequestException('Cannot provide check-in/out times when marking as absent');
-        }
+      console.log('Absence attendance data:', attendanceData);
 
-        if (!absenceReason || absenceReason.trim() === '') {
-          throw new BadRequestException('Absence reason is required when marking as absent');
-        }
-
-        // Mark as absent - create/update record with null check-in/out
-        const attendanceData = {
-          user_id: userId,
-          date,
-          check_in: null,
-          check_out: null,
-          is_absent: true,
-          absence_reason: absenceReason.trim(),
-          total_time_minutes: 0,
-          manual_entry: true,
-          updated_at: new Date()
-        };
-
+      // Use separate insert or update based on existing record
+      let result;
+      if (existing) {
+        console.log('Updating existing absent record');
+        // Update existing record
         const { data, error } = await supa
           .from('attendance')
-          .upsert([attendanceData], { 
-            onConflict: 'user_id,date',
-            ignoreDuplicates: false 
-          })
+          .update(attendanceData)
+          .eq('id', existing.id)
           .select()
           .single();
-
-        if (error) {
-          console.error('Error marking as absent:', error);
-          throw new InternalServerErrorException('Failed to mark as absent');
-        }
-
-        return {
-          message: 'User marked as absent',
-          data: {
-            ...data,
-            check_in_ist: null,
-            check_out_ist: null,
-            total_time_formatted: '00:00:00',
-            status: 'Absent',
-            user_info: {
-              name: userData.name,
-              employee_id: userData.employee_id,
-              designation: userData.designation
-            }
-          }
-        };
+        
+        result = { data, error };
+        console.log('Update result:', { data, error });
       } else {
-        // Mark as present with optional check-in/out times
-        if (checkIn) {
-          checkInDateTime = this.parseTimeToDate(date, checkIn);
-        }
-
-        if (checkOut) {
-          checkOutDateTime = this.parseTimeToDate(date, checkOut);
-        }
-
-        // If both check-in and check-out provided, validate and calculate duration
-        if (checkInDateTime && checkOutDateTime) {
-          if (checkOutDateTime <= checkInDateTime) {
-            throw new BadRequestException('Check-out time must be after check-in time');
-          }
-          totalMinutes = Number(((checkOutDateTime.getTime() - checkInDateTime.getTime()) / (1000 * 60)).toFixed(2));
-          totalTimeFormatted = this.formatDuration(checkInDateTime, checkOutDateTime);
-        }
-
-        const attendanceData: any = {
-          user_id: userId,
-          date,
-          check_in: checkInDateTime || (existing?.check_in || null),
-          check_out: checkOutDateTime || (existing?.check_out || null),
-          is_absent: false,
-          absence_reason: null,
-          manual_entry: true,
-          updated_at: new Date()
-        };
-
-        // Only update total time if both times are set or if we're updating an existing record
-        if (checkInDateTime && checkOutDateTime) {
-          attendanceData.total_time_minutes = totalMinutes;
-        } else if (existing?.total_time_minutes) {
-          attendanceData.total_time_minutes = existing.total_time_minutes;
-        } else {
-          attendanceData.total_time_minutes = null;
-        }
-
+        console.log('Inserting new absent record');
+        // Insert new record
         const { data, error } = await supa
           .from('attendance')
-          .upsert([attendanceData], { 
-            onConflict: 'user_id,date',
-            ignoreDuplicates: false 
-          })
+          .insert([attendanceData])
           .select()
           .single();
+        
+        result = { data, error };
+        console.log('Insert result:', { data, error });
+      }
 
-        if (error) {
-          console.error('Error updating attendance:', error);
-          throw new InternalServerErrorException('Failed to update attendance');
-        }
+      if (result.error) {
+        console.error('Error marking as absent:', result.error);
+        console.error('Error details:', {
+          code: result.error.code,
+          message: result.error.message,
+          details: result.error.details,
+          hint: result.error.hint
+        });
+        throw new InternalServerErrorException('Failed to mark as absent: ' + result.error.message);
+      }
 
-        const responseData = {
-          ...data,
-          check_in_ist: this.toIST(data.check_in),
-          check_out_ist: this.toIST(data.check_out),
-          total_time_formatted: totalTimeFormatted || 
-            (data.check_in && data.check_out ? this.formatDuration(data.check_in, data.check_out) : null),
-          status: data.check_in && !data.check_out ? 'Checked In' :
-                  data.check_in && data.check_out ? 'Checked Out' : 'Not Checked In',
+      console.log('Absent marked successfully:', result.data);
+
+      return {
+        message: 'User marked as absent',
+        data: {
+          ...result.data,
+          check_in_ist: null,
+          check_out_ist: null,
+          total_time_formatted: '00:00:00',
+          status: 'Absent',
           user_info: {
             name: userData.name,
             employee_id: userData.employee_id,
             designation: userData.designation
           }
-        };
+        }
+      };
+    } else {
+      console.log('Marking as PRESENT');
+      
+      // Mark as present with optional check-in/out times
+      if (checkIn) {
+        console.log(`Parsing check-in time: ${checkIn} for date: ${date}`);
+        checkInDateTime = this.parseTimeToDate(date, checkIn);
+        console.log('Parsed check-in DateTime:', checkInDateTime);
+      }
 
-        return {
-          message: 'Manual attendance recorded successfully',
-          data: responseData
-        };
+      if (checkOut) {
+        console.log(`Parsing check-out time: ${checkOut} for date: ${date}`);
+        checkOutDateTime = this.parseTimeToDate(date, checkOut);
+        console.log('Parsed check-out DateTime:', checkOutDateTime);
       }
-    } catch (err) {
-      console.error('Manual attendance error:', err);
-      if (err instanceof BadRequestException) {
-        throw err;
+
+      // If both check-in and check-out provided, validate and calculate duration
+      if (checkInDateTime && checkOutDateTime) {
+        console.log('Validating check-in/check-out times');
+        if (checkOutDateTime <= checkInDateTime) {
+          throw new BadRequestException('Check-out time must be after check-in time');
+        }
+        totalMinutes = Number(((checkOutDateTime.getTime() - checkInDateTime.getTime()) / (1000 * 60)).toFixed(2));
+        totalTimeFormatted = this.formatDuration(checkInDateTime, checkOutDateTime);
+        console.log(`Calculated total minutes: ${totalMinutes}, formatted: ${totalTimeFormatted}`);
       }
-      throw new InternalServerErrorException('Failed to record manual attendance');
+
+      const attendanceData: any = {
+        user_id: userId,
+        date,
+        check_in: checkInDateTime ? checkInDateTime.toISOString() : (existing?.check_in || null),
+        check_out: checkOutDateTime ? checkOutDateTime.toISOString() : (existing?.check_out || null),
+        is_absent: false,
+        absence_reason: null,
+        manual_entry: true,
+        updated_at: new Date().toISOString() // Use ISO string
+      };
+
+      // Only update total time if both times are set or if we're updating an existing record
+      if (checkInDateTime && checkOutDateTime) {
+        attendanceData.total_time_minutes = totalMinutes;
+      } else if (existing?.total_time_minutes) {
+        attendanceData.total_time_minutes = existing.total_time_minutes;
+      } else {
+        attendanceData.total_time_minutes = null;
+      }
+
+      console.log('Present attendance data:', JSON.stringify(attendanceData, null, 2));
+      console.log('Existing record:', existing);
+      console.log('Has existing record?', !!existing);
+
+      // Use separate insert or update based on existing record
+      let result;
+      if (existing) {
+        console.log('Updating existing present record with ID:', existing.id);
+        // Update existing record
+        const { data, error } = await supa
+          .from('attendance')
+          .update(attendanceData)
+          .eq('id', existing.id)
+          .select()
+          .single();
+        
+        result = { data, error };
+        console.log('Update result:', { data, error });
+      } else {
+        console.log('Inserting new present record');
+        // Insert new record
+        const { data, error } = await supa
+          .from('attendance')
+          .insert([attendanceData])
+          .select()
+          .single();
+        
+        result = { data, error };
+        console.log('Insert result:', { data, error });
+      }
+
+      if (result.error) {
+        console.error('Error updating attendance:', result.error);
+        console.error('Error details:', {
+          code: result.error.code,
+          message: result.error.message,
+          details: result.error.details,
+          hint: result.error.hint
+        });
+        throw new InternalServerErrorException('Failed to update attendance: ' + result.error.message);
+      }
+
+      console.log('Attendance saved successfully:', result.data);
+
+      const responseData = {
+        ...result.data,
+        check_in_ist: this.toIST(result.data.check_in),
+        check_out_ist: this.toIST(result.data.check_out),
+        total_time_formatted: totalTimeFormatted || 
+          (result.data.check_in && result.data.check_out ? this.formatDuration(result.data.check_in, result.data.check_out) : null),
+        status: result.data.check_in && !result.data.check_out ? 'Checked In' :
+                result.data.check_in && result.data.check_out ? 'Checked Out' : 'Not Checked In',
+        user_info: {
+          name: userData.name,
+          employee_id: userData.employee_id,
+          designation: userData.designation
+        }
+      };
+
+      console.log('=== MANUAL ATTENDANCE COMPLETE ===');
+      console.log('Response data:', responseData);
+
+      return {
+        message: 'Manual attendance recorded successfully',
+        data: responseData
+      };
     }
+  } catch (err) {
+    console.error('=== MANUAL ATTENDANCE ERROR ===');
+    console.error('Error:', err);
+    console.error('Error stack:', err.stack);
+    
+    if (err instanceof BadRequestException) {
+      throw err;
+    }
+    
+    // Log additional error details
+    if (err.code) {
+      console.error('Error code:', err.code);
+      console.error('Error message:', err.message);
+      console.error('Error details:', err.details);
+    }
+    
+    throw new InternalServerErrorException('Failed to record manual attendance: ' + (err.message || 'Unknown error'));
   }
+}
 
   // ✅ Get attendance summary for a user
   async getAttendanceSummary(userId: string, month?: string, year?: string) {
@@ -771,121 +879,180 @@ export class AttendanceService {
 
   // ✅ Process bulk action (mark multiple users as absent/present)
   async processBulkAction(dto: BulkActionDto) {
-    const { action, date, userIds, reason } = dto;
+  console.log('=== PROCESS BULK ACTION START ===');
+  console.log('Bulk action DTO:', JSON.stringify(dto, null, 2));
 
-    if (!action || !date || !userIds || userIds.length === 0) {
-      throw new BadRequestException('action, date, and userIds are required');
-    }
+  const { action, date, userIds, reason } = dto;
 
-    if (action !== 'absent' && action !== 'present') {
-      throw new BadRequestException('Action must be either "absent" or "present"');
-    }
+  if (!action || !date || !userIds || userIds.length === 0) {
+    throw new BadRequestException('action, date, and userIds are required');
+  }
 
-    // Validate date format
-    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
-    if (!dateRegex.test(date)) {
-      throw new BadRequestException('Date must be in YYYY-MM-DD format');
-    }
+  if (action !== 'absent' && action !== 'present') {
+    throw new BadRequestException('Action must be either "absent" or "present"');
+  }
 
-    // Validate not future date
-    const today = this.todayDate();
-    if (date > today) {
-      throw new BadRequestException('Cannot mark attendance for future dates');
-    }
+  // Validate date format
+  const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+  if (!dateRegex.test(date)) {
+    throw new BadRequestException('Date must be in YYYY-MM-DD format');
+  }
 
-    if (action === 'absent' && (!reason || reason.trim() === '')) {
-      throw new BadRequestException('Reason is required when marking as absent');
-    }
+  // Validate not future date
+  const today = this.todayDate();
+  if (date > today) {
+    throw new BadRequestException('Cannot mark attendance for future dates');
+  }
 
-    try {
-      const supa = this.supabase.getAdminClient();
-      const results: Array<any> = [];
-      const errors: Array<any> = [];
+  if (action === 'absent' && (!reason || reason.trim() === '')) {
+    throw new BadRequestException('Reason is required when marking as absent');
+  }
 
-      // Process each user
-      for (const userId of userIds) {
-        try {
-          let attendanceData: any;
-          
-          if (action === 'absent') {
-            attendanceData = {
-              user_id: userId,
-              date,
-              check_in: null,
-              check_out: null,
-              is_absent: true,
-              absence_reason: reason!.trim(),
-              total_time_minutes: 0,
-              manual_entry: true,
-              updated_at: new Date()
-            };
-          } else {
-            // For present, set default working hours
-            const checkInTime = this.parseTimeToDate(date, '09:00');
-            const checkOutTime = this.parseTimeToDate(date, '18:00');
-            
-            attendanceData = {
-              user_id: userId,
-              date,
-              check_in: checkInTime,
-              check_out: checkOutTime,
-              is_absent: false,
-              absence_reason: null,
-              total_time_minutes: checkInTime && checkOutTime ? 540 : null, // 9 hours in minutes
-              manual_entry: true,
-              updated_at: new Date()
-            };
-          }
+  try {
+    const supa = this.supabase.getAdminClient();
+    const results: Array<any> = [];
+    const errors: Array<any> = [];
 
-          const { data, error } = await supa
-            .from('attendance')
-            .upsert([attendanceData], { 
-              onConflict: 'user_id,date',
-              ignoreDuplicates: false 
-            })
-            .select()
-            .single();
+    console.log(`Processing ${userIds.length} users for ${action} on ${date}`);
 
-          if (error) {
-            errors.push({
-              userId,
-              error: error.message
-            });
-          } else {
-            results.push({
-              userId,
-              success: true,
-              data: {
-                ...data,
-                check_in_ist: this.toIST(data.check_in),
-                check_out_ist: this.toIST(data.check_out),
-                status: action === 'absent' ? 'Absent' : 'Present'
-              }
-            });
-          }
-        } catch (err: any) {
+    // Process each user
+    for (const userId of userIds) {
+      try {
+        console.log(`Processing user: ${userId}`);
+        
+        // First check if user exists
+        const { data: userCheck, error: userCheckError } = await supa
+          .from('users')
+          .select('id, email, name')
+          .eq('id', userId)
+          .single();
+
+        if (userCheckError || !userCheck) {
+          console.error(`User ${userId} not found in database`);
           errors.push({
             userId,
-            error: err.message || 'Unknown error'
+            error: 'User not found in database'
+          });
+          continue;
+        }
+
+        console.log(`User ${userId} found: ${userCheck.name} (${userCheck.email})`);
+
+        let attendanceData: any;
+        
+        if (action === 'absent') {
+          attendanceData = {
+            user_id: userId,
+            date,
+            check_in: null,
+            check_out: null,
+            is_absent: true,
+            absence_reason: reason!.trim(),
+            total_time_minutes: 0,
+            manual_entry: true,
+            updated_at: new Date().toISOString()
+          };
+        } else {
+          // For present, set default working hours
+          const checkInTime = this.parseTimeToDate(date, '09:00');
+          const checkOutTime = this.parseTimeToDate(date, '18:00');
+          
+          attendanceData = {
+            user_id: userId,
+            date,
+            check_in: checkInTime ? checkInTime.toISOString() : null,
+            check_out: checkOutTime ? checkOutTime.toISOString() : null,
+            is_absent: false,
+            absence_reason: null,
+            total_time_minutes: checkInTime && checkOutTime ? 540 : null, // 9 hours in minutes
+            manual_entry: true,
+            updated_at: new Date().toISOString()
+          };
+        }
+
+        console.log(`Attendance data for user ${userId}:`, attendanceData);
+
+        // Check if record already exists
+        const { data: existingRecord } = await supa
+          .from('attendance')
+          .select('id')
+          .eq('user_id', userId)
+          .eq('date', date)
+          .single();
+
+        let operationResult;
+        if (existingRecord) {
+          console.log(`Updating existing record for user ${userId}`);
+          // Update existing
+          operationResult = await supa
+            .from('attendance')
+            .update(attendanceData)
+            .eq('id', existingRecord.id)
+            .select()
+            .single();
+        } else {
+          console.log(`Inserting new record for user ${userId}`);
+          // Insert new
+          operationResult = await supa
+            .from('attendance')
+            .insert([attendanceData])
+            .select()
+            .single();
+        }
+
+        console.log(`Operation result for user ${userId}:`, operationResult);
+
+        if (operationResult.error) {
+          console.error(`Error for user ${userId}:`, operationResult.error);
+          errors.push({
+            userId,
+            error: operationResult.error.message,
+            details: operationResult.error
+          });
+        } else {
+          console.log(`Success for user ${userId}`);
+          results.push({
+            userId,
+            success: true,
+            data: {
+              ...operationResult.data,
+              check_in_ist: this.toIST(operationResult.data.check_in),
+              check_out_ist: this.toIST(operationResult.data.check_out),
+              status: action === 'absent' ? 'Absent' : 'Present'
+            }
           });
         }
+      } catch (err: any) {
+        console.error(`Exception for user ${userId}:`, err);
+        errors.push({
+          userId,
+          error: err.message || 'Unknown error',
+          stack: err.stack
+        });
       }
-
-      return {
-        action,
-        date,
-        total: userIds.length,
-        successful: results.length,
-        failed: errors.length,
-        results,
-        errors: errors.length > 0 ? errors : undefined
-      };
-    } catch (err: any) {
-      console.error('Bulk action error:', err);
-      if (err instanceof BadRequestException) throw err;
-      throw new InternalServerErrorException('Failed to process bulk action');
     }
+
+    console.log('=== PROCESS BULK ACTION COMPLETE ===');
+    console.log(`Results: ${results.length} successful, ${errors.length} failed`);
+
+    return {
+      action,
+      date,
+      total: userIds.length,
+      successful: results.length,
+      failed: errors.length,
+      results,
+      errors: errors.length > 0 ? errors : undefined
+    };
+  } catch (err: any) {
+    console.error('=== PROCESS BULK ACTION ERROR ===');
+    console.error('Error:', err);
+    console.error('Stack:', err.stack);
+    
+    if (err instanceof BadRequestException) throw err;
+    throw new InternalServerErrorException('Failed to process bulk action: ' + err.message);
   }
+}
 
   // ✅ Get dashboard statistics
   async getDashboardStats(date?: string) {
@@ -938,4 +1105,410 @@ export class AttendanceService {
       throw new InternalServerErrorException('Failed to fetch dashboard statistics');
     }
   }
+
+
+  // In AttendanceService class
+
+async getAllAttendanceWithFilters(filters: {
+  startDate?: string;
+  endDate?: string;
+  name?: string;
+  employeeId?: string;
+  status?: string;
+  month?: string;
+  year?: string;
+  date?: string;
+  department?: string;
+  designation?: string;
+  manualEntry?: string;
+  page?: number;
+  limit?: number;
+  sortBy?: string;
+  sortOrder?: 'asc' | 'desc';
+}) {
+  try {
+    const supa = this.supabase.getAdminClient();
+    
+    // Start with base query including user details
+    let query = supa
+      .from('attendance')
+      .select(`
+        *,
+        users!attendance_user_id_fkey (
+          id,
+          name,
+          email,
+          employee_id,
+          designation,
+          department,
+          profile_url,
+          role
+        )
+      `, { count: 'exact' });
+
+    // Apply date filters
+    if (filters.date) {
+      // Specific date filter
+      const date = new Date(filters.date);
+      if (isNaN(date.getTime())) {
+        throw new BadRequestException('Invalid date format');
+      }
+      query = query.eq('date', filters.date);
+    } else if (filters.startDate || filters.endDate) {
+      // Date range filter
+      if (filters.startDate) {
+        const startDate = new Date(filters.startDate);
+        if (isNaN(startDate.getTime())) {
+          throw new BadRequestException('Invalid start date format');
+        }
+        query = query.gte('date', filters.startDate);
+      }
+      if (filters.endDate) {
+        const endDate = new Date(filters.endDate);
+        if (isNaN(endDate.getTime())) {
+          throw new BadRequestException('Invalid end date format');
+        }
+        query = query.lte('date', filters.endDate);
+      }
+    } else if (filters.month || filters.year) {
+      // Month/Year filter
+      const month = filters.month || String(new Date().getMonth() + 1).padStart(2, '0');
+      const year = filters.year || String(new Date().getFullYear());
+      
+      const startDate = `${year}-${month}-01`;
+      const endDate = new Date(parseInt(year), parseInt(month), 0)
+        .toISOString().slice(0, 10);
+      
+      query = query.gte('date', startDate).lte('date', endDate);
+    }
+
+    // Apply user filters
+    if (filters.name) {
+      query = query.ilike('users.name', `%${filters.name}%`);
+    }
+    
+    if (filters.employeeId) {
+      query = query.eq('users.employee_id', filters.employeeId);
+    }
+    
+    if (filters.department) {
+      query = query.ilike('users.department', `%${filters.department}%`);
+    }
+    
+    if (filters.designation) {
+      query = query.ilike('users.designation', `%${filters.designation}%`);
+    }
+
+    // Apply attendance status filter
+    if (filters.status) {
+      const status = filters.status.toLowerCase();
+      switch (status) {
+        case 'present':
+          query = query.eq('is_absent', false).not('check_in', 'is', null);
+          break;
+        case 'absent':
+          query = query.eq('is_absent', true);
+          break;
+        case 'checked-in':
+          query = query.not('check_in', 'is', null).is('check_out', null).eq('is_absent', false);
+          break;
+        case 'checked-out':
+          query = query.not('check_in', 'is', null).not('check_out', 'is', null).eq('is_absent', false);
+          break;
+        case 'half-day':
+          query = query.not('check_in', 'is', null).is('check_out', null).eq('is_absent', false);
+          break;
+        case 'pending':
+          query = query.is('check_in', null).eq('is_absent', false);
+          break;
+      }
+    }
+
+    // Apply manual entry filter
+    if (filters.manualEntry !== undefined) {
+      const isManual = filters.manualEntry === 'true';
+      query = query.eq('manual_entry', isManual);
+    }
+
+    // Apply sorting
+    const sortField = filters.sortBy || 'date';
+    const sortDirection = filters.sortOrder || 'desc';
+    
+    switch (sortField) {
+      case 'name':
+        query = query.order('users.name', { ascending: sortDirection === 'asc' });
+        break;
+      case 'check_in':
+        query = query.order('check_in', { ascending: sortDirection === 'asc' });
+        break;
+      case 'check_out':
+        query = query.order('check_out', { ascending: sortDirection === 'asc' });
+        break;
+      case 'total_time_minutes':
+        query = query.order('total_time_minutes', { ascending: sortDirection === 'asc' });
+        break;
+      default:
+        query = query.order('date', { ascending: sortDirection === 'asc' });
+    }
+
+    // Apply pagination
+    const page = Math.max(1, filters.page || 1);
+    const limit = Math.min(100, Math.max(1, filters.limit || 20));
+    const from = (page - 1) * limit;
+    const to = from + limit - 1;
+
+    query = query.range(from, to);
+
+    // Execute query
+    const { data, error, count } = await query;
+
+    if (error) {
+      console.error('Error fetching filtered attendance:', error);
+      throw new InternalServerErrorException('Failed to fetch attendance data');
+    }
+
+    // Process and format the data
+    const formattedData = data.map((record) => {
+      const status = this.getDetailedStatus(record);
+      
+      return {
+        id: record.id,
+        user_id: record.user_id,
+        date: record.date,
+        check_in: record.check_in,
+        check_out: record.check_out,
+        check_in_ist: this.toIST(record.check_in),
+        check_out_ist: this.toIST(record.check_out),
+        total_time_minutes: record.total_time_minutes,
+        total_time_formatted: record.check_in && record.check_out 
+          ? this.formatDuration(record.check_in, record.check_out) 
+          : (record.is_absent ? '00:00:00' : null),
+        is_absent: record.is_absent,
+        absence_reason: record.absence_reason,
+        manual_entry: record.manual_entry || false,
+        status: status.label,
+        status_code: status.code,
+        updated_at: record.updated_at,
+        user_info: {
+          id: record.users?.id,
+          name: record.users?.name,
+          email: record.users?.email,
+          employee_id: record.users?.employee_id,
+          designation: record.users?.designation,
+          department: record.users?.department,
+          profile_url: record.users?.profile_url,
+          role: record.users?.role
+        }
+      };
+    });
+
+    // Calculate summary statistics
+    const summary = this.calculateAttendanceSummary(data);
+
+    return {
+      data: formattedData,
+      pagination: {
+        page,
+        limit,
+        total: count || 0,
+        total_pages: Math.ceil((count || 0) / limit),
+        has_next: (from + limit) < (count || 0),
+        has_prev: page > 1
+      },
+      filters: {
+        ...filters,
+        applied_filters: Object.keys(filters).filter(key => filters[key] !== undefined && key !== 'page' && key !== 'limit' && key !== 'sortBy' && key !== 'sortOrder')
+      },
+      summary
+    };
+  } catch (err) {
+    console.error('getAllAttendanceWithFilters error:', err);
+    if (err instanceof BadRequestException) throw err;
+    throw new InternalServerErrorException('Failed to fetch attendance data');
+  }
+}
+
+// Helper method for detailed status
+private getDetailedStatus(record: any): { label: string, code: string } {
+  if (record.is_absent) {
+    return { label: 'Absent', code: 'absent' };
+  }
+  
+  if (record.check_in && !record.check_out) {
+    return { label: 'Checked In', code: 'checked-in' };
+  }
+  
+  if (record.check_in && record.check_out) {
+    // Check if worked less than 4 hours (half day)
+    const totalHours = record.total_time_minutes ? record.total_time_minutes / 60 : 0;
+    if (totalHours > 0 && totalHours < 4) {
+      return { label: 'Half Day', code: 'half-day' };
+    }
+    return { label: 'Present', code: 'present' };
+  }
+  
+  return { label: 'Not Checked In', code: 'pending' };
+}
+
+// Calculate summary statistics
+private calculateAttendanceSummary(data: any[]) {
+  const total = data.length;
+  const present = data.filter(d => !d.is_absent && d.check_in && d.check_out).length;
+  const absent = data.filter(d => d.is_absent).length;
+  const checkedIn = data.filter(d => d.check_in && !d.check_out && !d.is_absent).length;
+  const pending = data.filter(d => !d.check_in && !d.is_absent).length;
+  const halfDays = data.filter(d => {
+    if (d.is_absent || !d.check_in || !d.check_out) return false;
+    const totalHours = d.total_time_minutes ? d.total_time_minutes / 60 : 0;
+    return totalHours > 0 && totalHours < 4;
+  }).length;
+
+  // Calculate average work hours
+  const completeDays = data.filter(d => d.check_in && d.check_out && !d.is_absent);
+  const avgWorkHours = completeDays.length > 0 
+    ? Number((completeDays.reduce((sum, d) => sum + (d.total_time_minutes || 0), 0) / completeDays.length / 60).toFixed(2))
+    : 0;
+
+  return {
+    total,
+    present,
+    absent,
+    checked_in: checkedIn,
+    pending,
+    half_days: halfDays,
+    average_work_hours: avgWorkHours,
+    percentage_present: total > 0 ? Number(((present / total) * 100).toFixed(2)) : 0
+  };
+}
+
+// Get monthly attendance report
+async getMonthlyReport(year?: string, month?: string, department?: string) {
+  try {
+    const supa = this.supabase.getAdminClient();
+    
+    const currentYear = year || String(new Date().getFullYear());
+    const currentMonth = month || String(new Date().getMonth() + 1).padStart(2, '0');
+    
+    // Calculate date range
+    const startDate = `${currentYear}-${currentMonth}-01`;
+    const endDate = new Date(parseInt(currentYear), parseInt(currentMonth), 0)
+      .toISOString().slice(0, 10);
+
+    // Get all users
+    let userQuery = supa
+      .from('users')
+      .select('id, name, email, employee_id, designation, department, role')
+      .eq('role', 'user');
+
+    if (department) {
+      userQuery = userQuery.ilike('department', `%${department}%`);
+    }
+
+    const { data: users, error: usersError } = await userQuery;
+
+    if (usersError) {
+      console.error('Error fetching users:', usersError);
+      throw new InternalServerErrorException('Failed to fetch users data');
+    }
+
+    // Get attendance for the month
+    const { data: attendance, error: attendanceError } = await supa
+      .from('attendance')
+      .select('*')
+      .in('user_id', users.map(u => u.id))
+      .gte('date', startDate)
+      .lte('date', endDate);
+
+    if (attendanceError) {
+      console.error('Error fetching attendance:', attendanceError);
+      throw new InternalServerErrorException('Failed to fetch attendance data');
+    }
+
+    // Organize data by user
+    const report = users.map(user => {
+      const userAttendance = attendance.filter(a => a.user_id === user.id);
+      const totalDays = userAttendance.length;
+      const presentDays = userAttendance.filter(a => !a.is_absent && a.check_in && a.check_out).length;
+      const absentDays = userAttendance.filter(a => a.is_absent).length;
+      const halfDays = userAttendance.filter(a => {
+        if (a.is_absent || !a.check_in || !a.check_out) return false;
+        const totalHours = a.total_time_minutes ? a.total_time_minutes / 60 : 0;
+        return totalHours > 0 && totalHours < 4;
+      }).length;
+
+      // Calculate total work hours
+      const totalWorkMinutes = userAttendance
+        .filter(a => a.check_in && a.check_out && !a.is_absent)
+        .reduce((sum, a) => sum + (a.total_time_minutes || 0), 0);
+
+      const averageWorkHours = presentDays > 0 
+        ? Number((totalWorkMinutes / presentDays / 60).toFixed(2))
+        : 0;
+
+      return {
+        employee_id: user.employee_id,
+        name: user.name,
+        email: user.email,
+        designation: user.designation,
+        department: user.department,
+        total_days: totalDays,
+        present_days: presentDays,
+        absent_days: absentDays,
+        half_days: halfDays,
+        total_work_hours: Number((totalWorkMinutes / 60).toFixed(2)),
+        average_work_hours: averageWorkHours,
+        attendance_rate: totalDays > 0 ? Number(((presentDays / totalDays) * 100).toFixed(2)) : 0,
+        details: userAttendance.map(a => ({
+          date: a.date,
+          status: this.getDetailedStatus(a).label,
+          check_in: this.toIST(a.check_in),
+          check_out: this.toIST(a.check_out),
+          total_time: a.check_in && a.check_out 
+            ? this.formatDuration(a.check_in, a.check_out) 
+            : null,
+          is_absent: a.is_absent,
+          absence_reason: a.absence_reason
+        })).sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
+      };
+    });
+
+    // Calculate overall summary
+    const overallSummary = {
+      total_employees: users.length,
+      total_days_in_month: new Date(parseInt(currentYear), parseInt(currentMonth), 0).getDate(),
+      month: currentMonth,
+      year: currentYear,
+      total_present_days: report.reduce((sum, r) => sum + r.present_days, 0),
+      total_absent_days: report.reduce((sum, r) => sum + r.absent_days, 0),
+      total_half_days: report.reduce((sum, r) => sum + r.half_days, 0),
+      average_attendance_rate: report.length > 0 
+        ? Number((report.reduce((sum, r) => sum + r.attendance_rate, 0) / report.length).toFixed(2))
+        : 0
+    };
+
+    return {
+      report,
+      overall_summary: overallSummary,
+      period: {
+        start_date: startDate,
+        end_date: endDate,
+        month: this.getMonthName(currentMonth),
+        year: currentYear
+      }
+    };
+  } catch (err) {
+    console.error('getMonthlyReport error:', err);
+    if (err instanceof BadRequestException) throw err;
+    throw new InternalServerErrorException('Failed to generate monthly report');
+  }
+}
+
+private getMonthName(month: string): string {
+  const months = [
+    'January', 'February', 'March', 'April', 'May', 'June',
+    'July', 'August', 'September', 'October', 'November', 'December'
+  ];
+  const monthIndex = parseInt(month) - 1;
+  return months[monthIndex] || 'Unknown';
+}
 }
