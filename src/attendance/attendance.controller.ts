@@ -8,10 +8,14 @@ import {
   UseGuards, 
   InternalServerErrorException, 
   Logger,
-  Res 
+  Res,
+  Req,
+  UseInterceptors,
+  Param,
+  Put
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth } from '@nestjs/swagger';
-import type { Response } from 'express'; // Import Response from express
+import type { Response, Request } from 'express';
 import { AttendanceService } from './attendance.service';
 import { 
   CheckInDto, 
@@ -22,7 +26,11 @@ import {
   BulkAttendanceDto,
   BulkActionDto,
   AttendanceSummaryQueryDto,
-  AttendanceFilterDto // Add this import
+  AttendanceFilterDto,
+  UpdateAttendanceDto,
+  HalfDayDto,
+  PermissionTimeDto,
+  GenerateReportDto
 } from './dto/attendance.dto';
 import { RolesGuard } from '../auth/roles.guard';
 import { Roles } from '../auth/roles.decorator';
@@ -104,7 +112,6 @@ export class AttendanceController {
     }
   }
 
-  // ✅ Get attendance summary
   @Get('summary')
   @ApiOperation({ summary: 'Get attendance summary for a user' })
   @ApiResponse({ status: 200, description: 'Attendance summary retrieved' })
@@ -119,7 +126,6 @@ export class AttendanceController {
     }
   }
 
-  // ✅ Admin-only manual attendance entry
   @Post('manual')
   @UseGuards(RolesGuard)
   @Roles('admin')
@@ -131,49 +137,36 @@ export class AttendanceController {
   async manualAttendance(@Body() body: ManualAttendanceDto) {
     try {
       this.logger.log(`Manual attendance request: ${JSON.stringify(body)}`);
-      
-      // Log user info for debugging
-      const request = (this as any).req;
-      if (request?.user) {
-        this.logger.debug(`Request user: ${JSON.stringify(request.user)}`);
-      }
-      
       const result = await this.attendanceService.manualAttendance(body);
       this.logger.log(`Manual attendance successful: ${result.message}`);
       return result;
     } catch (error) {
       this.logger.error(`Manual attendance error: ${error.message}`, error.stack);
-      this.logger.error(`Error details: ${JSON.stringify(error)}`);
-      
       if (error instanceof BadRequestException) {
         throw error;
       }
-      
       throw new InternalServerErrorException(
         error.message || 'Failed to record manual attendance'
       );
     }
   }
 
-  // ✅ Bulk manual attendance (multiple records)
-  @Post('bulk')
-  @UseGuards(RolesGuard)
-  @Roles('admin')
-  @ApiOperation({ summary: 'Admin: Bulk attendance update for multiple users' })
-  @ApiResponse({ status: 201, description: 'Bulk attendance recorded successfully' })
-  @ApiResponse({ status: 400, description: 'Invalid request' })
-  @ApiResponse({ status: 403, description: 'Admin access required' })
-  async bulkAttendance(@Body() body: BulkAttendanceDto) {
-    try {
-      this.logger.log(`Bulk attendance request for ${body.records?.length || 0} records`);
-      return this.attendanceService.bulkAttendanceUpdate(body.records);
-    } catch (error) {
-      this.logger.error(`Bulk attendance error: ${error.message}`, error.stack);
-      throw error;
-    }
-  }
+  // In your AttendanceController.ts
+@Post('bulk')
+@Roles('admin')
+async bulkAttendanceUpdate(
+  @Body() records: Array<{
+    userId: string;
+    date: string;
+    isAbsent?: boolean;
+    checkIn?: string;
+    checkOut?: string;
+    absenceReason?: string;
+  }>
+) {
+  return this.attendanceService.bulkAttendanceUpdate(records);
+}
 
-  // ✅ Bulk action (mark multiple users as absent/present)
   @Post('bulk-action')
   @UseGuards(RolesGuard)
   @Roles('admin')
@@ -191,7 +184,6 @@ export class AttendanceController {
     }
   }
 
-  // ✅ Get dashboard statistics
   @Get('stats')
   @UseGuards(RolesGuard)
   @Roles('admin')
@@ -208,7 +200,6 @@ export class AttendanceController {
     }
   }
 
-  // ✅ Get all attendance with advanced filters
   @Get('filter')
   @ApiOperation({ summary: 'Get all attendance with advanced filters' })
   @ApiResponse({ status: 200, description: 'Filtered attendance retrieved' })
@@ -222,7 +213,6 @@ export class AttendanceController {
     }
   }
 
-  // ✅ Get monthly attendance report
   @Get('monthly-report')
   @UseGuards(RolesGuard)
   @Roles('admin')
@@ -242,7 +232,6 @@ export class AttendanceController {
     }
   }
 
-  // ✅ Export attendance data to CSV
   @Get('export')
   @UseGuards(RolesGuard)
   @Roles('admin')
@@ -274,7 +263,121 @@ export class AttendanceController {
     }
   }
 
-  // ✅ Test endpoint for debugging
+  // ✅ NEW: Update previous attendance records
+  @Put('update/:id')
+  @UseGuards(RolesGuard)
+  @Roles('admin')
+  @ApiOperation({ summary: 'Admin: Update existing attendance record' })
+  @ApiResponse({ status: 200, description: 'Attendance record updated successfully' })
+  @ApiResponse({ status: 400, description: 'Invalid request' })
+  @ApiResponse({ status: 403, description: 'Admin access required' })
+  async updateAttendance(
+    @Param('id') id: string,
+    @Body() body: UpdateAttendanceDto
+  ) {
+    try {
+      this.logger.log(`Update attendance request for record ${id}: ${JSON.stringify(body)}`);
+      return this.attendanceService.updateAttendanceRecord(id, body);
+    } catch (error) {
+      this.logger.error(`Update attendance error: ${error.message}`, error.stack);
+      throw error;
+    }
+  }
+
+  // ✅ NEW: Mark half day (morning/afternoon)
+  @Post('half-day')
+  @UseGuards(RolesGuard)
+  @Roles('admin')
+  @ApiOperation({ summary: 'Admin: Mark half day attendance' })
+  @ApiResponse({ status: 201, description: 'Half day marked successfully' })
+  @ApiResponse({ status: 400, description: 'Invalid request' })
+  async markHalfDay(@Body() body: HalfDayDto) {
+    try {
+      this.logger.log(`Half day request: ${JSON.stringify(body)}`);
+      return this.attendanceService.markHalfDay(body);
+    } catch (error) {
+      this.logger.error(`Half day error: ${error.message}`, error.stack);
+      throw error;
+    }
+  }
+
+  // ✅ NEW: Record permission time
+  @Post('permission')
+  @UseGuards(RolesGuard)
+  @Roles('admin')
+  @ApiOperation({ summary: 'Admin: Record permission time for user' })
+  @ApiResponse({ status: 201, description: 'Permission time recorded successfully' })
+  @ApiResponse({ status: 400, description: 'Invalid request' })
+  async recordPermission(@Body() body: PermissionTimeDto) {
+    try {
+      this.logger.log(`Permission time request: ${JSON.stringify(body)}`);
+      return this.attendanceService.recordPermissionTime(body);
+    } catch (error) {
+      this.logger.error(`Permission time error: ${error.message}`, error.stack);
+      throw error;
+    }
+  }
+
+  // ✅ NEW: Generate PDF report
+@Post('generate-pdf')
+@UseGuards(RolesGuard)
+@Roles('admin')
+@ApiOperation({ summary: 'Admin: Generate PDF attendance report' })
+async generatePDFReport(
+  @Body() body: GenerateReportDto,
+  @Res() response: Response
+) {
+  const { pdfBuffer, meta } =
+    await this.attendanceService.generatePDFReport(body);
+
+  const filename = `attendance_report_${new Date()
+    .toISOString()
+    .slice(0, 10)}.pdf`;
+
+  response.setHeader('Content-Type', 'application/pdf');
+  response.setHeader(
+    'Content-Disposition',
+    `attachment; filename="${filename}"`
+  );
+
+  // 👇 Optional meta (frontend can read it)
+  response.setHeader(
+    'X-Report-Filters',
+    encodeURIComponent(JSON.stringify(meta))
+  );
+
+  response.send(pdfBuffer);
+}
+
+
+  // ✅ NEW: Bulk calculate attendance for specific time
+  @Post('bulk-calculate')
+  @UseGuards(RolesGuard)
+  @Roles('admin')
+  @ApiOperation({ summary: 'Admin: Bulk calculate attendance for specific time period' })
+  @ApiResponse({ status: 200, description: 'Attendance calculated successfully' })
+  async bulkCalculateAttendance(
+    @Body() body: {
+      userIds: string[];
+      startDate: string;
+      endDate: string;
+      workingHoursPerDay?: number;
+    }
+  ) {
+    try {
+      this.logger.log(`Bulk calculate request: ${JSON.stringify(body)}`);
+      return this.attendanceService.bulkCalculateAttendance(
+        body.userIds,
+        body.startDate,
+        body.endDate,
+        body.workingHoursPerDay
+      );
+    } catch (error) {
+      this.logger.error(`Bulk calculate error: ${error.message}`, error.stack);
+      throw error;
+    }
+  }
+
   @Get('test')
   @ApiOperation({ summary: 'Test endpoint for debugging' })
   @ApiResponse({ status: 200, description: 'Test successful' })
@@ -282,7 +385,17 @@ export class AttendanceController {
     return {
       message: 'Attendance API is working',
       timestamp: new Date().toISOString(),
-      version: '1.0.0'
+      version: '2.0.0',
+      features: [
+        'Check-in/Check-out',
+        'Manual attendance',
+        'Bulk operations',
+        'Half day marking',
+        'Permission time tracking',
+        'PDF report generation',
+        'Advanced filtering',
+        'Previous data updates'
+      ]
     };
   }
 
@@ -303,6 +416,9 @@ export class AttendanceController {
       'Total Time',
       'Status',
       'Absence Reason',
+      'Half Day Type',
+      'Permission Time',
+      'Permission Reason',
       'Manual Entry'
     ];
 
@@ -317,6 +433,9 @@ export class AttendanceController {
       item.total_time_formatted || '',
       item.status,
       item.absence_reason || '',
+      item.half_day_type || '',
+      item.permission_time || '',
+      item.permission_reason || '',
       item.manual_entry ? 'Yes' : 'No'
     ]);
 
