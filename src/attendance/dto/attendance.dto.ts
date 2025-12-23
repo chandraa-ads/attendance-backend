@@ -11,7 +11,9 @@ import {
   Max, 
   Min, 
   IsEnum,
-  IsIn
+  IsIn,
+  IsNotEmpty,
+  MinLength
 } from 'class-validator';
 import { Type } from 'class-transformer';
 
@@ -391,40 +393,36 @@ export class HalfDayDto {
 
 // ✅ NEW: Permission Time DTO
 export class PermissionTimeDto {
-  @ApiProperty({ description: 'User ID' })
   @IsString()
+  @IsNotEmpty()
   userId: string;
 
-  @ApiProperty({ description: 'Date in YYYY-MM-DD format' })
   @IsString()
-  @Matches(/^\d{4}-\d{2}-\d{2}$/, { message: 'Date must be in YYYY-MM-DD format' })
+  @IsNotEmpty()
+  @Matches(/^\d{4}-\d{2}-\d{2}$/, {
+    message: 'Date must be in YYYY-MM-DD format',
+  })
   date: string;
 
-  @ApiProperty({ 
-    description: 'Permission start time (HH:mm format)',
-    example: '14:00'
-  })
   @IsString()
-  @Matches(/^([01]?[0-9]|2[0-3]):[0-5][0-9]$/, { 
-    message: 'Permission time must be in HH:mm format (24-hour)' 
+  @IsNotEmpty()
+  @Matches(/^([01]?[0-9]|2[0-3]):[0-5][0-9]$/, {
+    message: 'Permission from time must be in HH:mm format (24-hour)',
   })
   permissionFrom: string;
 
-  @ApiProperty({ 
-    description: 'Permission end time (HH:mm format)',
-    example: '15:00'
-  })
   @IsString()
-  @Matches(/^([01]?[0-9]|2[0-3]):[0-5][0-9]$/, { 
-    message: 'Permission time must be in HH:mm format (24-hour)' 
+  @IsNotEmpty()
+  @Matches(/^([01]?[0-9]|2[0-3]):[0-5][0-9]$/, {
+    message: 'Permission to time must be in HH:mm format (24-hour)',
   })
   permissionTo: string;
 
-  @ApiProperty({ description: 'Reason for permission' })
   @IsString()
+  @IsNotEmpty()
+  @MinLength(5)
   reason: string;
 }
-
 // ✅ NEW: Generate Report DTO
 export class GenerateReportDto {
   // Date filters

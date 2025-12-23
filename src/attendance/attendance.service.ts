@@ -32,7 +32,7 @@ export class AttendanceService {
       // Format in IST timezone directly
       return d.toLocaleTimeString('en-IN', {
         timeZone: 'Asia/Kolkata',
-        hour12: false,
+        hour12: true,
         hour: '2-digit',
         minute: '2-digit',
         second: '2-digit'
@@ -1376,134 +1376,213 @@ export class AttendanceService {
     }
   }
 
-  // ✅ NEW: Record permission time
-  async recordPermissionTime(dto: PermissionTimeDto) {
-    console.log('=== RECORD PERMISSION TIME START ===');
-    console.log('Permission DTO:', JSON.stringify(dto, null, 2));
+// ✅ NEW: Record permission time with IST timezone and time deduction
+async recordPermissionTime(dto: PermissionTimeDto) {
+  console.log('=== RECORD PERMISSION TIME START ===');
+  console.log('Permission DTO:', JSON.stringify(dto, null, 2));
 
-    const { userId, date, permissionFrom, permissionTo, reason } = dto;
+  const { userId, date, permissionFrom, permissionTo, reason } = dto;
 
-    if (!userId || !date || !permissionFrom || !permissionTo || !reason) {
-      throw new BadRequestException('All fields are required: userId, date, permissionFrom, permissionTo, reason');
-    }
-
-    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
-    if (!dateRegex.test(date)) {
-      throw new BadRequestException('Date must be in YYYY-MM-DD format');
-    }
-
-    try {
-      const supa = this.supabase.getAdminClient();
-
-      // Verify user exists
-      const { data: userData, error: userErr } = await supa
-        .from('users')
-        .select('id, name, employee_id')
-        .eq('id', userId)
-        .single();
-
-      if (userErr || !userData) {
-        throw new BadRequestException('User not found');
-      }
-
-      // Parse permission times
-      const fromTime = this.parseTimeToDate(date, permissionFrom);
-      const toTime = this.parseTimeToDate(date, permissionTo);
-
-      if (!fromTime || !toTime) {
-        throw new BadRequestException('Invalid time format');
-      }
-
-      // Validate times
-      if (toTime <= fromTime) {
-        throw new BadRequestException('Permission end time must be after start time');
-      }
-
-      // Calculate permission duration in minutes
-      const permissionMinutes = Number(((toTime.getTime() - fromTime.getTime()) / (1000 * 60)).toFixed(2));
-
-      // Check if record exists
-      const { data: existingRecord } = await supa
-        .from('attendance')
-        .select('*')
-        .eq('user_id', userId)
-        .eq('date', date)
-        .single();
-
-      const attendanceData: any = {
-        user_id: userId,
-        date,
-        permission_time: `${permissionFrom}-${permissionTo}`,
-        permission_reason: reason,
-        permission_duration_minutes: permissionMinutes,
-        manual_entry: true,
-        updated_at: new Date().toISOString()
-      };
-
-      // If existing record has check-in/out, keep them
-      if (existingRecord) {
-        attendanceData.check_in = existingRecord.check_in;
-        attendanceData.check_out = existingRecord.check_out;
-        attendanceData.total_time_minutes = existingRecord.total_time_minutes;
-        attendanceData.is_absent = false;
-        attendanceData.absence_reason = null;
-        attendanceData.half_day_type = null;
-      }
-
-      let result;
-      if (existingRecord) {
-        // Update existing record
-        const { data, error } = await supa
-          .from('attendance')
-          .update(attendanceData)
-          .eq('id', existingRecord.id)
-          .select()
-          .single();
-        result = { data, error };
-      } else {
-        // Insert new record
-        const { data, error } = await supa
-          .from('attendance')
-          .insert([attendanceData])
-          .select()
-          .single();
-        result = { data, error };
-      }
-
-      if (result.error) {
-        throw new InternalServerErrorException('Failed to record permission time: ' + result.error.message);
-      }
-
-      const responseData = {
-        ...result.data,
-        check_in_ist: this.toIST(result.data.check_in),
-        check_out_ist: this.toIST(result.data.check_out),
-        total_time_formatted: result.data.check_in && result.data.check_out
-          ? this.formatDuration(result.data.check_in, result.data.check_out)
-          : null,
-        status: 'Permission',
-        user_info: {
-          name: userData.name,
-          employee_id: userData.employee_id
-        }
-      };
-
-      console.log('=== RECORD PERMISSION TIME COMPLETE ===');
-
-      return {
-        message: 'Permission time recorded successfully',
-        data: responseData
-      };
-    } catch (err) {
-      console.error('=== RECORD PERMISSION TIME ERROR ===');
-      console.error('Error:', err);
-
-      if (err instanceof BadRequestException) throw err;
-      throw new InternalServerErrorException('Failed to record permission time: ' + err.message);
-    }
+  if (!userId || !date || !permissionFrom || !permissionTo || !reason) {
+    throw new BadRequestException('All fields are required: userId, date, permissionFrom, permissionTo, reason');
   }
 
-  // ✅ NEW: Generate PDF report
+  const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+  if (!dateRegex.test(date)) {
+    throw new BadRequestException('Date must be in YYYY-MM-DD format');
+  }
+
+  try {
+    const supa = this.supabase.getAdminClient();
+
+    // Verify user exists
+    const { data: userData, error: userErr } = await supa
+      .from('users')
+      .select('id, name, employee_id')
+      .eq('id', userId)
+      .single();
+
+    if (userErr || !userData) {
+      throw new BadRequestException('User not found');
+    }
+
+    // Parse permission times in IST timezone
+    const fromTime = this.parseTimeToDateIST(date, permissionFrom);
+    const toTime = this.parseTimeToDateIST(date, permissionTo);
+
+    if (!fromTime || !toTime) {
+      throw new BadRequestException('Invalid time format');
+    }
+
+    // Validate times
+    if (toTime <= fromTime) {
+      throw new BadRequestException('Permission end time must be after start time');
+    }
+
+    // Calculate permission duration in minutes
+    const permissionMinutes = Number(((toTime.getTime() - fromTime.getTime()) / (1000 * 60)).toFixed(2));
+
+    // Check if record exists
+    const { data: existingRecord } = await supa
+      .from('attendance')
+      .select('*')
+      .eq('user_id', userId)
+      .eq('date', date)
+      .single();
+
+    // Format permission time for storage in IST format
+    const permissionTimeIST = `${this.formatTimeIST(permissionFrom)}-${this.formatTimeIST(permissionTo)}`;
+
+    const attendanceData: any = {
+      user_id: userId,
+      date,
+      permission_time: permissionTimeIST,
+      permission_reason: reason,
+      permission_duration_minutes: permissionMinutes,
+      manual_entry: true,
+      updated_at: new Date().toISOString(),
+      permission_from: fromTime.toISOString(), // Store actual datetime
+      permission_to: toTime.toISOString(),     // Store actual datetime
+    };
+
+    // Initialize adjustedTotalMinutes as null
+    let adjustedTotalMinutes: number | null = null;
+
+    // If existing record has check-in/out, adjust total time by deducting permission time
+    if (existingRecord?.check_in && existingRecord?.check_out) {
+      // Keep original check-in/out
+      attendanceData.check_in = existingRecord.check_in;
+      attendanceData.check_out = existingRecord.check_out;
+      attendanceData.is_absent = false;
+      attendanceData.absence_reason = null;
+      attendanceData.half_day_type = null;
+
+      // Calculate original total time in minutes
+      const originalCheckIn = new Date(existingRecord.check_in);
+      const originalCheckOut = new Date(existingRecord.check_out);
+      const originalTotalMinutes = Number(((originalCheckOut.getTime() - originalCheckIn.getTime()) / (1000 * 60)).toFixed(2));
+
+      // Calculate overlap between permission time and work time
+      const overlapStart = Math.max(originalCheckIn.getTime(), fromTime.getTime());
+      const overlapEnd = Math.min(originalCheckOut.getTime(), toTime.getTime());
+
+      let overlapMinutes = 0;
+      if (overlapEnd > overlapStart) {
+        overlapMinutes = Number(((overlapEnd - overlapStart) / (1000 * 60)).toFixed(2));
+      }
+
+      // Calculate adjusted total time (original - permission overlap)
+      adjustedTotalMinutes = Math.max(0, originalTotalMinutes - overlapMinutes);
+      attendanceData.total_time_minutes = adjustedTotalMinutes;
+      
+    } else if (existingRecord) {
+      // Keep existing data if no check-in/check-out
+      attendanceData.check_in = existingRecord.check_in;
+      attendanceData.check_out = existingRecord.check_out;
+      attendanceData.total_time_minutes = existingRecord.total_time_minutes;
+      attendanceData.is_absent = existingRecord.is_absent;
+      attendanceData.absence_reason = existingRecord.absence_reason;
+      attendanceData.half_day_type = existingRecord.half_day_type;
+    }
+
+    let result;
+    if (existingRecord) {
+      // Update existing record
+      const { data, error } = await supa
+        .from('attendance')
+        .update(attendanceData)
+        .eq('id', existingRecord.id)
+        .select()
+        .single();
+      result = { data, error };
+    } else {
+      // Insert new record
+      const { data, error } = await supa
+        .from('attendance')
+        .insert([attendanceData])
+        .select()
+        .single();
+      result = { data, error };
+    }
+
+    if (result.error) {
+      throw new InternalServerErrorException('Failed to record permission time: ' + result.error.message);
+    }
+
+    // Format response
+    const responseData = {
+      ...result.data,
+      check_in_ist: this.toIST(result.data.check_in),
+      check_out_ist: this.toIST(result.data.check_out),
+      total_time_formatted: result.data.check_in && result.data.check_out
+        ? this.formatDuration(result.data.check_in, result.data.check_out)
+        : null,
+      status: 'Permission',
+      user_info: {
+        name: userData.name,
+        employee_id: userData.employee_id
+      },
+      permission_details: {
+        time: permissionTimeIST,
+        duration_minutes: permissionMinutes,
+        duration_formatted: this.formatMinutesToHHMM(permissionMinutes),
+        adjusted_total_minutes: adjustedTotalMinutes,
+        adjusted_total_formatted: adjustedTotalMinutes ? this.formatMinutesToHHMM(adjustedTotalMinutes) : null
+      }
+    };
+
+    console.log('=== RECORD PERMISSION TIME COMPLETE ===');
+
+    return {
+      message: 'Permission time recorded successfully',
+      data: responseData
+    };
+  } catch (err) {
+    console.error('=== RECORD PERMISSION TIME ERROR ===');
+    console.error('Error:', err);
+
+    if (err instanceof BadRequestException) throw err;
+    throw new InternalServerErrorException('Failed to record permission time: ' + err.message);
+  }
+}
+
+// Helper method: Parse time to Date in IST timezone
+private parseTimeToDateIST(dateStr: string, timeStr: string): Date | null {
+  if (!timeStr || !dateStr) return null;
+
+  try {
+    const [hours, minutes] = timeStr.split(':').map(Number);
+    if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59 || isNaN(hours) || isNaN(minutes)) {
+      throw new BadRequestException('Invalid time format. Use HH:mm (24-hour format)');
+    }
+
+    // Create date string with explicit IST timezone
+    const dateTimeStr = `${dateStr}T${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:00.000+05:30`;
+    
+    // Parse as IST timezone
+    return new Date(dateTimeStr);
+  } catch {
+    throw new BadRequestException('Invalid time format. Use HH:mm (24-hour format)');
+  }
+}
+
+// Helper method: Format time to IST string (HH:mm)
+private formatTimeIST(timeStr: string): string {
+  if (!timeStr) return '';
+  
+  const [hours, minutes] = timeStr.split(':').map(Number);
+  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+}
+
+// Helper method: Convert minutes to HH:mm format (renamed to avoid duplicate)
+private formatMinutesToHHMM(totalMinutes: number): string {
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = Math.floor(totalMinutes % 60);
+  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+}
+
+// ✅ NEW: Generate PDF report with improved design
+// ✅ NEW: Generate PDF report with improved design
 async generatePDFReport(dto: GenerateReportDto) {
   const {
     startDate,
@@ -1517,6 +1596,7 @@ async generatePDFReport(dto: GenerateReportDto) {
 
   const supa = this.supabase.getAdminClient();
 
+  // Build query with filters - REMOVE joining_date as it doesn't exist
   let query = supa
     .from('attendance')
     .select(`
@@ -1527,41 +1607,31 @@ async generatePDFReport(dto: GenerateReportDto) {
         email,
         employee_id,
         designation,
-        department
+        department,
+        profile_url
       )
     `)
     .order('date', { ascending: false });
 
-  // 🔹 Day filter
+  // Apply filters
   if (day) {
     query = query.eq('date', day);
-  }
-
-  // 🔹 Month filter (YYYY-MM)
-  else if (month) {
+  } else if (month) {
     const start = `${month}-01`;
     const end = new Date(
       new Date(start).getFullYear(),
       new Date(start).getMonth() + 1,
       0
-    )
-      .toISOString()
-      .slice(0, 10);
-
+    ).toISOString().slice(0, 10);
     query = query.gte('date', start).lte('date', end);
-  }
-
-  // 🔹 Date range filter
-  else if (startDate && endDate) {
+  } else if (startDate && endDate) {
     query = query.gte('date', startDate).lte('date', endDate);
   }
 
-  // 🔹 Employee filter
   if (employeeId) {
     query = query.eq('users.employee_id', employeeId);
   }
 
-  // 🔹 Department filter
   if (department) {
     query = query.ilike('users.department', `%${department}%`);
   }
@@ -1569,6 +1639,7 @@ async generatePDFReport(dto: GenerateReportDto) {
   const { data, error } = await query;
 
   if (error) {
+    console.error('Database error:', error);
     throw new InternalServerErrorException(error.message);
   }
 
@@ -1576,258 +1647,555 @@ async generatePDFReport(dto: GenerateReportDto) {
     throw new BadRequestException('No attendance data found');
   }
 
-  // ----------------------------
-  // Process Attendance Records
-  // ----------------------------
-const processedData = data.map(record => ({
-  date: record.date,
-
-  employee_id: record.users?.employee_id ?? 'N/A',
-  name: record.users?.name ?? 'N/A',
-  department: record.users?.department ?? 'N/A',
-  designation: record.users?.designation ?? 'N/A',
-
-  check_in: this.toIST(record.check_in) || '-',
-  check_out: this.toIST(record.check_out) || '-',
-
-  total_time:
-    record.total_time_minutes != null
-      ? `${Math.floor(record.total_time_minutes / 60)}h ${record.total_time_minutes % 60}m`
+  // Process data for PDF
+  const processedData = data.map(record => ({
+    date: record.date,
+    employee_id: record.users?.employee_id ?? 'N/A',
+    name: record.users?.name ?? 'N/A',
+    department: record.users?.department ?? 'N/A',
+    designation: record.users?.designation ?? 'N/A',
+    check_in: this.toIST(record.check_in) || '-',
+    check_out: this.toIST(record.check_out) || '-',
+    total_time: record.total_time_minutes != null
+      ? this.formatMinutesToHHMM(record.total_time_minutes)
       : '00:00',
-
-  status: this.getStatus(record),
-
-  is_absent: record.is_absent ? 'Yes' : 'No',
-  absence_reason: record.absence_reason || '-',
-
-  half_day_type: record.half_day_type || '-',
-
-  permission_time: record.permission_time || '-',
-  permission_duration:
-    record.permission_duration_minutes != null
-      ? `${record.permission_duration_minutes} mins`
+    status: this.getStatus(record),
+    is_absent: record.is_absent ? 'Yes' : 'No',
+    absence_reason: record.absence_reason?.substring(0, 50) || '-',
+    half_day_type: record.half_day_type || '-',
+    permission_time: record.permission_time || '-',
+    permission_duration: record.permission_duration_minutes != null
+      ? `${Math.floor(record.permission_duration_minutes / 60)}h ${record.permission_duration_minutes % 60}m`
       : '-',
-  permission_reason: record.permission_reason || '-',
+    permission_reason: record.permission_reason?.substring(0, 50) || '-',
+    manual_entry: record.manual_entry ? 'Yes' : 'No',
+    notes: record.notes?.substring(0, 50) || '-',
+    created_at: this.toIST(record.created_at),
+    updated_at: this.toIST(record.updated_at),
+  }));
 
-  manual_entry: record.manual_entry ? 'Yes' : 'No',
+  // Calculate summary statistics
+  const summary = {
+    totalRecords: processedData.length,
+    present: processedData.filter(r => r.status === 'Present').length,
+    absent: processedData.filter(r => r.status === 'Absent').length,
+    halfDay: processedData.filter(r => r.status.includes('Half Day')).length,
+    permission: processedData.filter(r => r.status === 'Permission').length,
+    checkedIn: processedData.filter(r => r.status === 'Checked In').length,
+    notCheckedIn: processedData.filter(r => r.status === 'Not Checked In').length,
+  };
 
-  notes: record.notes || '-',
+  // Create metadata object for PDF
+  const metadata = {
+    reportType,
+    startDate: startDate || day || (month ? `${month}-01` : null),
+    endDate: endDate || day || (month ? new Date(
+      new Date(`${month}-01`).getFullYear(),
+      new Date(`${month}-01`).getMonth() + 1,
+      0
+    ).toISOString().slice(0, 10) : null),
+    employeeId: employeeId || null,
+    department: department || null,
+    generatedAt: new Date().toLocaleString('en-IN', {
+      timeZone: 'Asia/Kolkata',
+      dateStyle: 'medium',
+      timeStyle: 'medium'
+    }),
+  };
 
-  created_at: this.toIST(record.created_at),
-  updated_at: this.toIST(record.updated_at),
-}));
-
-
-
-
-  // ----------------------------
-  // Generate PDF
-  // ----------------------------
-  const pdfBuffer = await this.createPDF(
-    processedData,
-    [],
-    {
-      reportType,
-      generatedAt: new Date().toLocaleString('en-IN', {
-        timeZone: 'Asia/Kolkata',
-      }),
-    }
-  );
+  // Generate PDF based on report type
+  const pdfBuffer = reportType === 'summary' 
+    ? await this.createSummaryPDF(processedData, summary, metadata)
+    : await this.createDetailedPDF(processedData, summary, metadata);
 
   return {
     pdfBuffer,
     meta: {
-      filtersApplied: {
-        day: day || null,
-        month: month || null,
-        startDate: startDate || null,
-        endDate: endDate || null,
-        employeeId: employeeId || null,
-        department: department || null,
-      },
+      filtersApplied: dto,
       totalRecords: processedData.length,
+      summary,
     },
   };
 }
+// Helper to create detailed PDF with better design
+private async createDetailedPDF(data: any[], summary: any, metadata: any): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    try {
+      // Create PDF document with better margins
+      const doc = new PDFDocument({
+        size: 'A4',
+        layout: 'landscape',
+        margin: 30,
+        bufferPages: true,
+        font: 'Helvetica'
+      });
 
-  // Helper to create PDF
-  private async createPDF(data: any[], summary: any[], metadata: any): Promise<Buffer> {
-    return new Promise((resolve, reject) => {
-      try {
-       const doc = new PDFDocument({
-  size: 'A4',
-  layout: 'landscape',
-  margin: 40,
-  bufferPages: true,
-});
+      const buffers: Buffer[] = [];
+      doc.on('data', buffers.push.bind(buffers));
+      doc.on('end', () => {
+        const pdfData = Buffer.concat(buffers);
+        resolve(pdfData);
+      });
 
-        const buffers: Buffer[] = [];
-        doc.on('data', buffers.push.bind(buffers));
-        doc.on('end', () => {
-          const pdfData = Buffer.concat(buffers);
-          resolve(pdfData);
+      // ========== HEADER ==========
+      doc.rect(0, 0, doc.page.width, 80)
+        .fill('#1a237e'); // Deep blue header
+
+      doc.fillColor('white')
+        .fontSize(24)
+        .font('Helvetica-Bold')
+        .text('ATTENDANCE REPORT', 30, 30, {
+          align: 'left',
+          width: doc.page.width - 60
         });
 
-        // Header
-        doc.fontSize(20).text('Attendance Report', { align: 'center' });
-        doc.moveDown();
+      doc.fillColor('white')
+        .fontSize(10)
+        .font('Helvetica')
+        .text('Generated by Attendance Management System', 30, 58, {
+          align: 'left'
+        });
 
-        // Metadata
-        doc.fontSize(10);
-        doc.text(`Period: ${metadata.startDate} to ${metadata.endDate}`);
-        if (metadata.employeeId) {
-          doc.text(`Employee ID: ${metadata.employeeId}`);
-        }
-        if (metadata.department) {
-          doc.text(`Department: ${metadata.department}`);
-        }
-        doc.text(`Report Type: ${metadata.reportType}`);
-        doc.text(`Generated: ${metadata.generatedAt}`);
-        doc.moveDown();
+      // Company logo (placeholder)
+      doc.fillColor('white')
+        .fontSize(8)
+        .text('AMS', doc.page.width - 60, 30, {
+          align: 'right'
+        });
 
-        // Summary Section
-        doc.fontSize(14).text('Summary', { underline: true });
-        doc.moveDown();
+      // ========== METADATA SECTION ==========
+      doc.y = 100;
+      doc.fillColor('#37474f')
+        .fontSize(11)
+        .font('Helvetica-Bold')
+        .text('Report Information', 30, doc.y);
 
-        if (summary.length > 0) {
-          doc.fontSize(10);
-          summary.forEach((emp, index) => {
-            doc.text(`${index + 1}. ${emp.name}`);
-            doc.text(`   Total Days: ${emp.total_days}, Present: ${emp.present_days}, Absent: ${emp.absent_days}`);
-            doc.text(`   Half Days: ${emp.half_days}, Permission: ${emp.permission_days}`);
-            doc.text(`   Total Work Hours: ${emp.total_work_hours.toFixed(2)}`);
-            doc.moveDown(0.5);
+      doc.moveDown(0.3);
+
+      // Metadata table
+      const metadataTable = {
+        headers: ['Period', 'Employee ID', 'Department', 'Report Type', 'Generated On'],
+        data: [[
+          metadata.startDate && metadata.endDate 
+            ? `${metadata.startDate} to ${metadata.endDate}` 
+            : metadata.month || 'Custom Range',
+          metadata.employeeId || 'All',
+          metadata.department || 'All',
+          metadata.reportType.charAt(0).toUpperCase() + metadata.reportType.slice(1),
+          metadata.generatedAt
+        ]]
+      };
+
+      // Draw metadata table
+      doc.font('Helvetica');
+      const metadataX = 30;
+      let metadataY = doc.y;
+      const colWidths = [120, 80, 100, 80, 120];
+
+      // Draw headers
+      doc.fontSize(9).font('Helvetica-Bold');
+      metadataTable.headers.forEach((header, i) => {
+        doc.fillColor('#546e7a')
+          .text(header, metadataX + colWidths.slice(0, i).reduce((a, b) => a + b, 0), metadataY, {
+            width: colWidths[i],
+            align: 'left'
           });
-        }
+      });
 
-        doc.moveDown();
+      metadataY += 15;
 
-        // Detailed Data Section
-        if (metadata.reportType === 'detailed') {
-          doc.fontSize(14).text('Detailed Attendance', { underline: true });
-          doc.moveDown();
-
-          // Table headers
-          const headers = [
-  'Date',
-  'Employee ID',
-  'Name',
-  'Department',
-  'Designation',
-  'Check In',
-  'Check Out',
-  'Total Time',
-  'Status',
-  'Absent',
-  'Absence Reason',
-  'Half Day',
-  'Permission Time',
-  'Permission Duration',
-  'Permission Reason',
-  'Manual Entry',
-  'Notes',
-  'Created At',
-  'Updated At',
-];
-
-          const columnWidths = [
-  60, 70, 90, 70, 80,
-  60, 60, 60, 60,
-  50, 80, 60,
-  70, 80, 80,
-  60, 90, 80, 80
-];
-
-          let y = doc.y;
-
-          // Draw headers
-          doc.fontSize(8).font('Helvetica-Bold');
-          headers.forEach((header, i) => {
-            doc.text(header, 50 + columnWidths.slice(0, i).reduce((a, b) => a + b, 0), y, {
-              width: columnWidths[i],
+      // Draw data
+      doc.fontSize(9).font('Helvetica');
+      metadataTable.data.forEach(row => {
+        row.forEach((cell, i) => {
+          doc.fillColor('#263238')
+            .text(cell, metadataX + colWidths.slice(0, i).reduce((a, b) => a + b, 0), metadataY, {
+              width: colWidths[i],
               align: 'left'
             });
-          });
+        });
+        metadataY += 15;
+      });
 
-          y += 20;
-          doc.font('Helvetica');
+      doc.y = metadataY + 10;
 
-          // Draw data rows
-          data.forEach((row, rowIndex) => {
-           const rowData = [
-  row.date,
-  row.employee_id,
-  row.name,
-  row.department,
-  row.designation,
-  row.check_in,
-  row.check_out,
-  row.total_time,
-  row.status,
-  row.is_absent,
-  row.absence_reason,
-  row.half_day_type,
-  row.permission_time,
-  row.permission_duration,
-  row.permission_reason,
-  row.manual_entry,
-  row.notes,
-  row.created_at,
-  row.updated_at,
-];
+      // ========== SUMMARY SECTION ==========
+      if (summary) {
+        doc.fillColor('#1a237e')
+          .fontSize(12)
+          .font('Helvetica-Bold')
+          .text('SUMMARY STATISTICS', 30, doc.y);
 
+        doc.moveDown(0.5);
 
-            // Check if we need a new page
-            if (y > 700) {
-              doc.addPage();
-              y = 50;
+        const summaryCards = [
+          { label: 'Total Records', value: summary.totalRecords, color: '#1565c0' },
+          { label: 'Present', value: summary.present, color: '#2e7d32' },
+          { label: 'Absent', value: summary.absent, color: '#c62828' },
+          { label: 'Half Day', value: summary.halfDay, color: '#f9a825' },
+          { label: 'Permission', value: summary.permission, color: '#6a1b9a' },
+          { label: 'Pending', value: summary.notCheckedIn, color: '#546e7a' }
+        ];
 
-              // Redraw headers on new page
-              doc.fontSize(8).font('Helvetica-Bold');
-              headers.forEach((header, i) => {
-                doc.text(header, 50 + columnWidths.slice(0, i).reduce((a, b) => a + b, 0), y, {
-                  width: columnWidths[i],
-                  align: 'left'
-                });
-              });
-              y += 20;
-              doc.font('Helvetica');
-            }
+        // Draw summary cards
+        let cardX = 30;
+        let cardY = doc.y;
+        const cardWidth = (doc.page.width - 80) / 3;
+        const cardHeight = 40;
+        let cardCount = 0;
 
-            // Draw row data
-            rowData.forEach((cell, i) => {
-              doc.fontSize(8).text(cell.toString(),
-                50 + columnWidths.slice(0, i).reduce((a, b) => a + b, 0),
-                y, {
-                width: columnWidths[i],
-                align: 'left'
-              }
-              );
+        summaryCards.forEach(card => {
+          // Draw card background
+          doc.roundedRect(cardX, cardY, cardWidth, cardHeight, 5)
+            .fill(card.color);
+
+          // Draw card content
+          doc.fillColor('white')
+            .fontSize(16)
+            .font('Helvetica-Bold')
+            .text(card.value.toString(), cardX + 15, cardY + 10, {
+              width: cardWidth - 30,
+              align: 'left'
             });
 
-            y += 15;
-          });
-        }
+          doc.fillColor('white')
+            .fontSize(8)
+            .font('Helvetica')
+            .text(card.label.toUpperCase(), cardX + 15, cardY + 28, {
+              width: cardWidth - 30,
+              align: 'left'
+            });
 
-        // Footer
-        const pageCount = doc.bufferedPageRange().count;
-        for (let i = 0; i < pageCount; i++) {
-          doc.switchToPage(i);
-          doc.fontSize(8)
-            .text(
-              `Page ${i + 1} of ${pageCount}`,
-              50,
-              doc.page.height - 50,
-              { align: 'center' }
-            );
-        }
+          cardX += cardWidth + 10;
+          cardCount++;
 
-        doc.end();
-      } catch (err) {
-        reject(err);
+          if (cardCount % 3 === 0) {
+            cardX = 30;
+            cardY += cardHeight + 10;
+          }
+        });
+
+        doc.y = cardY + cardHeight + 20;
       }
-    });
-  }
+
+      // ========== ATTENDANCE DATA SECTION ==========
+      doc.fillColor('#1a237e')
+        .fontSize(12)
+        .font('Helvetica-Bold')
+        .text('ATTENDANCE DETAILS', 30, doc.y);
+
+      doc.moveDown(0.5);
+
+      // Check if we need a new page for data
+      if (doc.y > 500) {
+        doc.addPage();
+        doc.y = 50;
+      }
+
+      // Table headers for detailed report
+      const headers = [
+        { label: 'Date', width: 60 },
+        { label: 'Emp ID', width: 60 },
+        { label: 'Name', width: 90 },
+        { label: 'Department', width: 70 },
+        { label: 'Check In', width: 60 },
+        { label: 'Check Out', width: 60 },
+        { label: 'Total Time', width: 60 },
+        { label: 'Status', width: 70 },
+        { label: 'Absent', width: 50 },
+        { label: 'Permission', width: 70 },
+        { label: 'Manual', width: 50 }
+      ];
+
+      const headerY = doc.y;
+      let currentY = headerY;
+
+      // Draw table headers with styling
+      doc.fontSize(8).font('Helvetica-Bold');
+      headers.forEach((header, i) => {
+        const xPos = 30 + headers.slice(0, i).reduce((sum, h) => sum + h.width, 0);
+        
+        // Header background
+        doc.rect(xPos, currentY, header.width, 20)
+          .fill('#e8eaf6');
+        
+        // Header text
+        doc.fillColor('#1a237e')
+          .text(header.label, xPos + 5, currentY + 6, {
+            width: header.width - 10,
+            align: 'center'
+          });
+      });
+
+      currentY += 20;
+
+      // Draw data rows with alternating colors
+      doc.fontSize(7).font('Helvetica');
+      data.forEach((row, rowIndex) => {
+        // Check if we need a new page
+        if (currentY > doc.page.height - 50) {
+          doc.addPage();
+          currentY = 50;
+          
+          // Redraw headers on new page
+          headers.forEach((header, i) => {
+            const xPos = 30 + headers.slice(0, i).reduce((sum, h) => sum + h.width, 0);
+            doc.rect(xPos, currentY, header.width, 20)
+              .fill('#e8eaf6');
+            doc.fillColor('#1a237e')
+              .fontSize(8).font('Helvetica-Bold')
+              .text(header.label, xPos + 5, currentY + 6, {
+                width: header.width - 10,
+                align: 'center'
+              });
+          });
+          currentY += 20;
+        }
+
+        // Alternate row colors
+        const rowColor = rowIndex % 2 === 0 ? '#fafafa' : '#ffffff';
+        
+        // Row data
+        const rowData = [
+          row.date,
+          row.employee_id,
+          row.name.substring(0, 20) + (row.name.length > 20 ? '...' : ''),
+          row.department.substring(0, 15) + (row.department.length > 15 ? '...' : ''),
+          row.check_in,
+          row.check_out,
+          row.total_time,
+          row.status.substring(0, 15) + (row.status.length > 15 ? '...' : ''),
+          row.is_absent,
+          row.permission_time !== '-' ? 'Yes' : 'No',
+          row.manual_entry
+        ];
+
+        // Draw row background
+        headers.forEach((header, i) => {
+          const xPos = 30 + headers.slice(0, i).reduce((sum, h) => sum + h.width, 0);
+          doc.rect(xPos, currentY, header.width, 15)
+            .fill(rowColor);
+        });
+
+        // Draw row data
+        rowData.forEach((cell, i) => {
+          const xPos = 30 + headers.slice(0, i).reduce((sum, h) => sum + h.width, 0);
+          
+          // Determine text color based on status
+          let textColor = '#263238';
+          if (headers[i].label === 'Status') {
+            if (cell.includes('Present')) textColor = '#2e7d32';
+            else if (cell.includes('Absent')) textColor = '#c62828';
+            else if (cell.includes('Half Day')) textColor = '#f9a825';
+            else if (cell.includes('Permission')) textColor = '#6a1b9a';
+          }
+
+          doc.fillColor(textColor)
+            .text(cell.toString(), xPos + 5, currentY + 4, {
+              width: headers[i].width - 10,
+              align: 'center'
+            });
+        });
+
+        currentY += 15;
+      });
+
+      // Draw table borders
+      const tableWidth = headers.reduce((sum, h) => sum + h.width, 0);
+      doc.rect(30, headerY, tableWidth, currentY - headerY)
+        .stroke('#b0bec5');
+
+      // ========== FOOTER ==========
+      const pageCount = doc.bufferedPageRange().count;
+      for (let i = 0; i < pageCount; i++) {
+        doc.switchToPage(i);
+        
+        // Footer background
+        doc.rect(0, doc.page.height - 40, doc.page.width, 40)
+          .fill('#f5f5f5');
+        
+        // Page number
+        doc.fillColor('#546e7a')
+          .fontSize(9)
+          .text(
+            `Page ${i + 1} of ${pageCount}`,
+            30,
+            doc.page.height - 30,
+            { align: 'left' }
+          );
+        
+        // Footer text
+        doc.fillColor('#78909c')
+          .fontSize(8)
+          .text(
+            `Confidential - For Internal Use Only | Generated on ${metadata.generatedAt}`,
+            30,
+            doc.page.height - 15,
+            { align: 'left' }
+          );
+        
+        // Company info
+        doc.fillColor('#78909c')
+          .fontSize(8)
+          .text(
+            '© 2024 Attendance Management System',
+            doc.page.width - 200,
+            doc.page.height - 30,
+            { align: 'right' }
+          );
+      }
+
+      doc.end();
+    } catch (err) {
+      console.error('PDF Generation Error:', err);
+      reject(err);
+    }
+  });
+}
+
+// Helper method for simple summary report
+private async createSummaryPDF(data: any[], summary: any, metadata: any): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    try {
+      const doc = new PDFDocument({
+        size: 'A4',
+        margin: 40,
+        bufferPages: true,
+      });
+
+      const buffers: Buffer[] = [];
+      doc.on('data', buffers.push.bind(buffers));
+      doc.on('end', () => {
+        const pdfData = Buffer.concat(buffers);
+        resolve(pdfData);
+      });
+
+      // Header with company branding
+      doc.fillColor('#1a237e')
+        .fontSize(24)
+        .font('Helvetica-Bold')
+        .text('ATTENDANCE SUMMARY REPORT', { align: 'center' });
+
+      doc.moveDown(0.5);
+      doc.fillColor('#546e7a')
+        .fontSize(10)
+        .text(`Period: ${metadata.startDate} to ${metadata.endDate}`, { align: 'center' });
+      
+      doc.text(`Generated: ${metadata.generatedAt}`, { align: 'center' });
+      doc.moveDown(1);
+
+      // Summary Statistics
+      doc.fillColor('#37474f')
+        .fontSize(16)
+        .text('Summary Statistics', { underline: true });
+      doc.moveDown(0.5);
+
+      const stats = [
+        `• Total Records: ${summary.totalRecords}`,
+        `• Present: ${summary.present} (${((summary.present / summary.totalRecords) * 100).toFixed(1)}%)`,
+        `• Absent: ${summary.absent} (${((summary.absent / summary.totalRecords) * 100).toFixed(1)}%)`,
+        `• Half Day: ${summary.halfDay} (${((summary.halfDay / summary.totalRecords) * 100).toFixed(1)}%)`,
+        `• Permission: ${summary.permission} (${((summary.permission / summary.totalRecords) * 100).toFixed(1)}%)`,
+        `• Checked In: ${summary.checkedIn}`,
+        `• Not Checked In: ${summary.notCheckedIn}`
+      ];
+
+      stats.forEach(stat => {
+        doc.fillColor('#263238')
+          .fontSize(11)
+          .text(stat, { indent: 20 });
+      });
+
+      doc.moveDown(1);
+
+      // Simplified data table
+      if (data.length > 0) {
+        doc.fillColor('#37474f')
+          .fontSize(16)
+          .text('Attendance Overview', { underline: true });
+        doc.moveDown(0.5);
+
+        // Create a simpler table
+        const tableTop = doc.y;
+        const tableHeaders = ['Date', 'Employee', 'Check In', 'Check Out', 'Status'];
+        const colWidths = [80, 150, 80, 80, 100];
+
+        // Draw headers
+        doc.fontSize(10).font('Helvetica-Bold');
+        tableHeaders.forEach((header, i) => {
+          doc.fillColor('#1a237e')
+            .text(header, 40 + colWidths.slice(0, i).reduce((a, b) => a + b, 0), tableTop, {
+              width: colWidths[i],
+              align: 'left'
+            });
+        });
+
+        let y = tableTop + 20;
+        doc.font('Helvetica');
+
+        // Draw data (limit to first 30 rows for summary)
+        data.slice(0, 30).forEach((row, index) => {
+          if (y > doc.page.height - 100) {
+            doc.addPage();
+            y = 50;
+          }
+
+          const rowData = [
+            row.date,
+            `${row.name} (${row.employee_id})`,
+            row.check_in,
+            row.check_out,
+            row.status
+          ];
+
+          // Alternate row colors
+          const fillColor = index % 2 === 0 ? '#f5f5f5' : '#ffffff';
+          tableHeaders.forEach((_, i) => {
+            doc.rect(40 + colWidths.slice(0, i).reduce((a, b) => a + b, 0), y, colWidths[i], 15)
+              .fill(fillColor);
+          });
+
+          rowData.forEach((cell, i) => {
+            doc.fontSize(9)
+              .fillColor('#263238')
+              .text(cell.toString(), 45 + colWidths.slice(0, i).reduce((a, b) => a + b, 0), y + 3, {
+                width: colWidths[i] - 10,
+                align: 'left'
+              });
+          });
+
+          y += 15;
+        });
+
+        if (data.length > 30) {
+          doc.moveDown();
+          doc.fillColor('#546e7a')
+            .fontSize(9)
+            .text(`* Showing 30 of ${data.length} records. Use detailed report for complete data.`);
+        }
+      }
+
+      // Footer
+      const pageCount = doc.bufferedPageRange().count;
+      for (let i = 0; i < pageCount; i++) {
+        doc.switchToPage(i);
+        doc.fontSize(8)
+          .fillColor('#78909c')
+          .text(
+            `Page ${i + 1} of ${pageCount}`,
+            50,
+            doc.page.height - 30,
+            { align: 'center' }
+          );
+      }
+
+      doc.end();
+    } catch (err) {
+      reject(err);
+    }
+  });
+}
+
 
   // ✅ NEW: Bulk calculate attendance for specific time period
   async bulkCalculateAttendance(
@@ -2017,56 +2385,80 @@ const processedData = data.map(record => ({
     }
   }
   // ✅ Get dashboard statistics
-  async getDashboardStats(date?: string) {
-    try {
-      const supa = this.supabase.getAdminClient();
-      const targetDate = date || this.todayDate();
+ // In your AttendanceService.ts file, update the getDashboardStats method:
 
-      // Get total users count
-      const { count: totalUsers, error: usersError } = await supa
-        .from('users')
-        .select('*', { count: 'exact', head: true })
-        .eq('role', 'user');
+async getDashboardStats(date?: string) {
+  try {
+    const supa = this.supabase.getAdminClient();
+    const targetDate = date || this.todayDate();
 
-      if (usersError) {
-        console.error('Error fetching users count:', usersError);
-        throw new InternalServerErrorException('Failed to fetch users count');
-      }
+    // Get total users count (only users with role 'user', not 'admin')
+    const { count: totalUsers, error: usersError } = await supa
+      .from('users')
+      .select('*', { count: 'exact', head: true })
+      .eq('role', 'user');
 
-      // Get today's attendance
-      const { data: attendanceData, error: attendanceError } = await supa
-        .from('attendance')
-        .select('*, users!inner(role)')
-        .eq('date', targetDate)
-        .eq('users.role', 'user');
-
-      if (attendanceError) {
-        console.error('Error fetching attendance:', attendanceError);
-        throw new InternalServerErrorException('Failed to fetch attendance data');
-      }
-
-      // Calculate statistics
-      const presentToday = attendanceData.filter(a => !a.is_absent && a.check_in).length;
-      const absentToday = attendanceData.filter(a => a.is_absent).length;
-      const checkedInToday = attendanceData.filter(a => a.check_in && !a.check_out).length;
-      const checkedOutToday = attendanceData.filter(a => a.check_in && a.check_out).length;
-
-      return {
-        date: targetDate,
-        total_users: totalUsers || 0,
-        today_attendance: attendanceData.length,
-        present_today: presentToday,
-        absent_today: absentToday,
-        checked_in_today: checkedInToday,
-        checked_out_today: checkedOutToday,
-        pending_today: (totalUsers || 0) - attendanceData.length
-      };
-    } catch (err) {
-      console.error('getDashboardStats error:', err);
-      if (err instanceof BadRequestException) throw err;
-      throw new InternalServerErrorException('Failed to fetch dashboard statistics');
+    if (usersError) {
+      console.error('Error fetching users count:', usersError);
+      throw new InternalServerErrorException('Failed to fetch users count');
     }
+
+    // Get today's attendance - FIXED query
+    const { data: attendanceData, error: attendanceError } = await supa
+      .from('attendance')
+      .select(`
+        *,
+        users!attendance_user_id_fkey (
+          id,
+          name,
+          role
+        )
+      `)
+      .eq('date', targetDate);
+
+    if (attendanceError) {
+      console.error('Error fetching attendance:', attendanceError);
+      throw new InternalServerErrorException('Failed to fetch attendance data');
+    }
+
+    // Filter attendance records to only include users with role 'user' (not 'admin')
+    const filteredAttendance = attendanceData.filter(record => 
+      record.users?.role === 'user'
+    );
+
+    // Calculate statistics
+    const presentToday = filteredAttendance.filter(a => 
+      !a.is_absent && a.check_in
+    ).length;
+    
+    const absentToday = filteredAttendance.filter(a => 
+      a.is_absent
+    ).length;
+    
+    const checkedInToday = filteredAttendance.filter(a => 
+      a.check_in && !a.check_out
+    ).length;
+    
+    const checkedOutToday = filteredAttendance.filter(a => 
+      a.check_in && a.check_out
+    ).length;
+
+    return {
+      date: targetDate,
+      total_users: totalUsers || 0,
+      today_attendance: filteredAttendance.length,
+      present_today: presentToday,
+      absent_today: absentToday,
+      checked_in_today: checkedInToday,
+      checked_out_today: checkedOutToday,
+      pending_today: Math.max(0, (totalUsers || 0) - filteredAttendance.length)
+    };
+  } catch (err) {
+    console.error('getDashboardStats error:', err);
+    if (err instanceof BadRequestException) throw err;
+    throw new InternalServerErrorException('Failed to fetch dashboard statistics');
   }
+}
 
   async getAllAttendanceWithFilters(filters: {
     startDate?: string;
