@@ -8,14 +8,13 @@ import {
   PermissionTimeDto,
   GenerateReportDto
 } from './dto/attendance.dto';
-import PDFDocument from 'pdfkit';
-
+import PDFDocument = require('pdfkit');
 @Injectable()
 export class AttendanceService {
   constructor(private readonly supabase: SupabaseService) { }
 
 
-  
+
   // Helper to get today's date in YYYY-MM-DD format
   private todayDate(): string {
     return new Date().toISOString().slice(0, 10);
@@ -66,24 +65,24 @@ export class AttendanceService {
   }
 
   // Parse time string (HH:mm) to Date object for specific date
- private parseTimeToDate(dateStr: string, timeStr: string): Date | null {
-  if (!timeStr || !dateStr) return null;
+  private parseTimeToDate(dateStr: string, timeStr: string): Date | null {
+    if (!timeStr || !dateStr) return null;
 
-  try {
-    const [hours, minutes] = timeStr.split(':').map(Number);
-    if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59 || isNaN(hours) || isNaN(minutes)) {
+    try {
+      const [hours, minutes] = timeStr.split(':').map(Number);
+      if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59 || isNaN(hours) || isNaN(minutes)) {
+        throw new BadRequestException('Invalid time format. Use HH:mm (24-hour format)');
+      }
+
+      // Create date string with explicit IST timezone (+05:30)
+      const dateTimeStr = `${dateStr}T${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:00+05:30`;
+
+      // Parse as IST timezone
+      return new Date(dateTimeStr);
+    } catch {
       throw new BadRequestException('Invalid time format. Use HH:mm (24-hour format)');
     }
-
-    // Create date string with explicit IST timezone (+05:30)
-    const dateTimeStr = `${dateStr}T${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:00+05:30`;
-    
-    // Parse as IST timezone
-    return new Date(dateTimeStr);
-  } catch {
-    throw new BadRequestException('Invalid time format. Use HH:mm (24-hour format)');
   }
-}
 
   // Get status for a record
   private getStatus(record: any): string {
@@ -1376,230 +1375,247 @@ export class AttendanceService {
     }
   }
 
-// ✅ NEW: Record permission time with IST timezone and time deduction
-async recordPermissionTime(dto: PermissionTimeDto) {
-  console.log('=== RECORD PERMISSION TIME START ===');
-  console.log('Permission DTO:', JSON.stringify(dto, null, 2));
+  // ✅ NEW: Record permission time with IST timezone and time deduction
+  async recordPermissionTime(dto: PermissionTimeDto) {
+    console.log('=== RECORD PERMISSION TIME START ===');
+    console.log('Permission DTO:', JSON.stringify(dto, null, 2));
 
-  const { userId, date, permissionFrom, permissionTo, reason } = dto;
+    const { userId, date, permissionFrom, permissionTo, reason } = dto;
 
-  if (!userId || !date || !permissionFrom || !permissionTo || !reason) {
-    throw new BadRequestException('All fields are required: userId, date, permissionFrom, permissionTo, reason');
-  }
-
-  const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
-  if (!dateRegex.test(date)) {
-    throw new BadRequestException('Date must be in YYYY-MM-DD format');
-  }
-
-  try {
-    const supa = this.supabase.getAdminClient();
-
-    // Verify user exists
-    const { data: userData, error: userErr } = await supa
-      .from('users')
-      .select('id, name, employee_id')
-      .eq('id', userId)
-      .single();
-
-    if (userErr || !userData) {
-      throw new BadRequestException('User not found');
+    if (!userId || !date || !permissionFrom || !permissionTo || !reason) {
+      throw new BadRequestException('All fields are required: userId, date, permissionFrom, permissionTo, reason');
     }
 
-    // Parse permission times in IST timezone
-    const fromTime = this.parseTimeToDateIST(date, permissionFrom);
-    const toTime = this.parseTimeToDateIST(date, permissionTo);
-
-    if (!fromTime || !toTime) {
-      throw new BadRequestException('Invalid time format');
+    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+    if (!dateRegex.test(date)) {
+      throw new BadRequestException('Date must be in YYYY-MM-DD format');
     }
 
-    // Validate times
-    if (toTime <= fromTime) {
-      throw new BadRequestException('Permission end time must be after start time');
-    }
+    try {
+      const supa = this.supabase.getAdminClient();
 
-    // Calculate permission duration in minutes
-    const permissionMinutes = Number(((toTime.getTime() - fromTime.getTime()) / (1000 * 60)).toFixed(2));
+      // Verify user exists
+      const { data: userData, error: userErr } = await supa
+        .from('users')
+        .select('id, name, employee_id')
+        .eq('id', userId)
+        .single();
 
-    // Check if record exists
-    const { data: existingRecord } = await supa
-      .from('attendance')
-      .select('*')
-      .eq('user_id', userId)
-      .eq('date', date)
-      .single();
-
-    // Format permission time for storage in IST format
-    const permissionTimeIST = `${this.formatTimeIST(permissionFrom)}-${this.formatTimeIST(permissionTo)}`;
-
-    const attendanceData: any = {
-      user_id: userId,
-      date,
-      permission_time: permissionTimeIST,
-      permission_reason: reason,
-      permission_duration_minutes: permissionMinutes,
-      manual_entry: true,
-      updated_at: new Date().toISOString(),
-      permission_from: fromTime.toISOString(), // Store actual datetime
-      permission_to: toTime.toISOString(),     // Store actual datetime
-    };
-
-    // Initialize adjustedTotalMinutes as null
-    let adjustedTotalMinutes: number | null = null;
-
-    // If existing record has check-in/out, adjust total time by deducting permission time
-    if (existingRecord?.check_in && existingRecord?.check_out) {
-      // Keep original check-in/out
-      attendanceData.check_in = existingRecord.check_in;
-      attendanceData.check_out = existingRecord.check_out;
-      attendanceData.is_absent = false;
-      attendanceData.absence_reason = null;
-      attendanceData.half_day_type = null;
-
-      // Calculate original total time in minutes
-      const originalCheckIn = new Date(existingRecord.check_in);
-      const originalCheckOut = new Date(existingRecord.check_out);
-      const originalTotalMinutes = Number(((originalCheckOut.getTime() - originalCheckIn.getTime()) / (1000 * 60)).toFixed(2));
-
-      // Calculate overlap between permission time and work time
-      const overlapStart = Math.max(originalCheckIn.getTime(), fromTime.getTime());
-      const overlapEnd = Math.min(originalCheckOut.getTime(), toTime.getTime());
-
-      let overlapMinutes = 0;
-      if (overlapEnd > overlapStart) {
-        overlapMinutes = Number(((overlapEnd - overlapStart) / (1000 * 60)).toFixed(2));
+      if (userErr || !userData) {
+        throw new BadRequestException('User not found');
       }
 
-      // Calculate adjusted total time (original - permission overlap)
-      adjustedTotalMinutes = Math.max(0, originalTotalMinutes - overlapMinutes);
-      attendanceData.total_time_minutes = adjustedTotalMinutes;
-      
-    } else if (existingRecord) {
-      // Keep existing data if no check-in/check-out
-      attendanceData.check_in = existingRecord.check_in;
-      attendanceData.check_out = existingRecord.check_out;
-      attendanceData.total_time_minutes = existingRecord.total_time_minutes;
-      attendanceData.is_absent = existingRecord.is_absent;
-      attendanceData.absence_reason = existingRecord.absence_reason;
-      attendanceData.half_day_type = existingRecord.half_day_type;
-    }
+      // Parse permission times in IST timezone
+      const fromTime = this.parseTimeToDateIST(date, permissionFrom);
+      const toTime = this.parseTimeToDateIST(date, permissionTo);
 
-    let result;
-    if (existingRecord) {
-      // Update existing record
-      const { data, error } = await supa
-        .from('attendance')
-        .update(attendanceData)
-        .eq('id', existingRecord.id)
-        .select()
-        .single();
-      result = { data, error };
-    } else {
-      // Insert new record
-      const { data, error } = await supa
-        .from('attendance')
-        .insert([attendanceData])
-        .select()
-        .single();
-      result = { data, error };
-    }
-
-    if (result.error) {
-      throw new InternalServerErrorException('Failed to record permission time: ' + result.error.message);
-    }
-
-    // Format response
-    const responseData = {
-      ...result.data,
-      check_in_ist: this.toIST(result.data.check_in),
-      check_out_ist: this.toIST(result.data.check_out),
-      total_time_formatted: result.data.check_in && result.data.check_out
-        ? this.formatDuration(result.data.check_in, result.data.check_out)
-        : null,
-      status: 'Permission',
-      user_info: {
-        name: userData.name,
-        employee_id: userData.employee_id
-      },
-      permission_details: {
-        time: permissionTimeIST,
-        duration_minutes: permissionMinutes,
-        duration_formatted: this.formatMinutesToHHMM(permissionMinutes),
-        adjusted_total_minutes: adjustedTotalMinutes,
-        adjusted_total_formatted: adjustedTotalMinutes ? this.formatMinutesToHHMM(adjustedTotalMinutes) : null
+      if (!fromTime || !toTime) {
+        throw new BadRequestException('Invalid time format');
       }
-    };
 
-    console.log('=== RECORD PERMISSION TIME COMPLETE ===');
+      // Validate times
+      if (toTime <= fromTime) {
+        throw new BadRequestException('Permission end time must be after start time');
+      }
 
-    return {
-      message: 'Permission time recorded successfully',
-      data: responseData
-    };
-  } catch (err) {
-    console.error('=== RECORD PERMISSION TIME ERROR ===');
-    console.error('Error:', err);
+      // Calculate permission duration in minutes
+      const permissionMinutes = Number(((toTime.getTime() - fromTime.getTime()) / (1000 * 60)).toFixed(2));
 
-    if (err instanceof BadRequestException) throw err;
-    throw new InternalServerErrorException('Failed to record permission time: ' + err.message);
+      // Check if record exists
+      const { data: existingRecord } = await supa
+        .from('attendance')
+        .select('*')
+        .eq('user_id', userId)
+        .eq('date', date)
+        .single();
+
+      // Format permission time for storage in IST format
+      const permissionTimeIST = `${this.formatTimeIST(permissionFrom)}-${this.formatTimeIST(permissionTo)}`;
+
+      const attendanceData: any = {
+        user_id: userId,
+        date,
+        permission_time: permissionTimeIST,
+        permission_reason: reason,
+        permission_duration_minutes: permissionMinutes,
+        manual_entry: true,
+        updated_at: new Date().toISOString(),
+        permission_from: fromTime.toISOString(), // Store actual datetime
+        permission_to: toTime.toISOString(),     // Store actual datetime
+      };
+
+      // Initialize adjustedTotalMinutes as null
+      let adjustedTotalMinutes: number | null = null;
+
+      // If existing record has check-in/out, adjust total time by deducting permission time
+      if (existingRecord?.check_in && existingRecord?.check_out) {
+        // Keep original check-in/out
+        attendanceData.check_in = existingRecord.check_in;
+        attendanceData.check_out = existingRecord.check_out;
+        attendanceData.is_absent = false;
+        attendanceData.absence_reason = null;
+        attendanceData.half_day_type = null;
+
+        // Calculate original total time in minutes
+        const originalCheckIn = new Date(existingRecord.check_in);
+        const originalCheckOut = new Date(existingRecord.check_out);
+        const originalTotalMinutes = Number(((originalCheckOut.getTime() - originalCheckIn.getTime()) / (1000 * 60)).toFixed(2));
+
+        // Calculate overlap between permission time and work time
+        const overlapStart = Math.max(originalCheckIn.getTime(), fromTime.getTime());
+        const overlapEnd = Math.min(originalCheckOut.getTime(), toTime.getTime());
+
+        let overlapMinutes = 0;
+        if (overlapEnd > overlapStart) {
+          overlapMinutes = Number(((overlapEnd - overlapStart) / (1000 * 60)).toFixed(2));
+        }
+
+        // Calculate adjusted total time (original - permission overlap)
+        adjustedTotalMinutes = Math.max(0, originalTotalMinutes - overlapMinutes);
+        attendanceData.total_time_minutes = adjustedTotalMinutes;
+
+      } else if (existingRecord) {
+        // Keep existing data if no check-in/check-out
+        attendanceData.check_in = existingRecord.check_in;
+        attendanceData.check_out = existingRecord.check_out;
+        attendanceData.total_time_minutes = existingRecord.total_time_minutes;
+        attendanceData.is_absent = existingRecord.is_absent;
+        attendanceData.absence_reason = existingRecord.absence_reason;
+        attendanceData.half_day_type = existingRecord.half_day_type;
+      }
+
+      let result;
+      if (existingRecord) {
+        // Update existing record
+        const { data, error } = await supa
+          .from('attendance')
+          .update(attendanceData)
+          .eq('id', existingRecord.id)
+          .select()
+          .single();
+        result = { data, error };
+      } else {
+        // Insert new record
+        const { data, error } = await supa
+          .from('attendance')
+          .insert([attendanceData])
+          .select()
+          .single();
+        result = { data, error };
+      }
+
+      if (result.error) {
+        throw new InternalServerErrorException('Failed to record permission time: ' + result.error.message);
+      }
+
+      // Format response
+      const responseData = {
+        ...result.data,
+        check_in_ist: this.toIST(result.data.check_in),
+        check_out_ist: this.toIST(result.data.check_out),
+        total_time_formatted: result.data.check_in && result.data.check_out
+          ? this.formatDuration(result.data.check_in, result.data.check_out)
+          : null,
+        status: 'Permission',
+        user_info: {
+          name: userData.name,
+          employee_id: userData.employee_id
+        },
+        permission_details: {
+          time: permissionTimeIST,
+          duration_minutes: permissionMinutes,
+          duration_formatted: this.formatMinutesToHHMM(permissionMinutes),
+          adjusted_total_minutes: adjustedTotalMinutes,
+          adjusted_total_formatted: adjustedTotalMinutes ? this.formatMinutesToHHMM(adjustedTotalMinutes) : null
+        }
+      };
+
+      console.log('=== RECORD PERMISSION TIME COMPLETE ===');
+
+      return {
+        message: 'Permission time recorded successfully',
+        data: responseData
+      };
+    } catch (err) {
+      console.error('=== RECORD PERMISSION TIME ERROR ===');
+      console.error('Error:', err);
+
+      if (err instanceof BadRequestException) throw err;
+      throw new InternalServerErrorException('Failed to record permission time: ' + err.message);
+    }
   }
-}
 
-// Helper method: Parse time to Date in IST timezone
-private parseTimeToDateIST(dateStr: string, timeStr: string): Date | null {
-  if (!timeStr || !dateStr) return null;
+  // Helper method: Parse time to Date in IST timezone
+  private parseTimeToDateIST(dateStr: string, timeStr: string): Date | null {
+    if (!timeStr || !dateStr) return null;
 
-  try {
-    const [hours, minutes] = timeStr.split(':').map(Number);
-    if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59 || isNaN(hours) || isNaN(minutes)) {
+    try {
+      const [hours, minutes] = timeStr.split(':').map(Number);
+      if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59 || isNaN(hours) || isNaN(minutes)) {
+        throw new BadRequestException('Invalid time format. Use HH:mm (24-hour format)');
+      }
+
+      // Create date string with explicit IST timezone
+      const dateTimeStr = `${dateStr}T${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:00.000+05:30`;
+
+      // Parse as IST timezone
+      return new Date(dateTimeStr);
+    } catch {
       throw new BadRequestException('Invalid time format. Use HH:mm (24-hour format)');
     }
-
-    // Create date string with explicit IST timezone
-    const dateTimeStr = `${dateStr}T${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:00.000+05:30`;
-    
-    // Parse as IST timezone
-    return new Date(dateTimeStr);
-  } catch {
-    throw new BadRequestException('Invalid time format. Use HH:mm (24-hour format)');
   }
-}
 
-// Helper method: Format time to IST string (HH:mm)
-private formatTimeIST(timeStr: string): string {
-  if (!timeStr) return '';
-  
-  const [hours, minutes] = timeStr.split(':').map(Number);
-  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
-}
+  // Helper method: Format time to IST string (HH:mm)
+  private formatTimeIST(timeStr: string): string {
+    if (!timeStr) return '';
 
-// Helper method: Convert minutes to HH:mm format (renamed to avoid duplicate)
-private formatMinutesToHHMM(totalMinutes: number): string {
-  const hours = Math.floor(totalMinutes / 60);
-  const minutes = Math.floor(totalMinutes % 60);
-  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
-}
+    const [hours, minutes] = timeStr.split(':').map(Number);
+    return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+  }
 
-// ✅ NEW: Generate PDF report with improved design
-// ✅ NEW: Generate PDF report with improved design
-async generatePDFReport(dto: GenerateReportDto) {
-  const {
-    startDate,
-    endDate,
-    day,
-    month,
-    employeeId,
-    department,
-    reportType = 'detailed',
-  } = dto;
+  // Helper method: Convert minutes to HH:mm format (renamed to avoid duplicate)
+  private formatMinutesToHHMM(totalMinutes: number): string {
+    const hours = Math.floor(totalMinutes / 60);
+    const minutes = Math.floor(totalMinutes % 60);
+    return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+  }
 
-  const supa = this.supabase.getAdminClient();
+  // ✅ NEW: Generate PDF report with improved design
+  // ✅ NEW: Generate PDF report with improved design
+  async generatePDFReport(dto: GenerateReportDto & {
+    name?: string;
+    status?: string;
+    designation?: string;
+    lateArrivalsOnly?: boolean;
+    earlyDeparturesOnly?: boolean;
+    includeSummary?: boolean;
+    groupByDepartment?: boolean;
+    includeCharts?: boolean;
+  }) {
+    const {
+      startDate,
+      endDate,
+      day,
+      month,
+      employeeId,
+      department,
+      name,
+      status,
+      designation,
+      lateArrivalsOnly = false,
+      earlyDeparturesOnly = false,
+      includeSummary = true,
+      groupByDepartment = false,
+      includeCharts = false,
+      reportType = 'detailed',
+    } = dto;
 
-  // Build query with filters - REMOVE joining_date as it doesn't exist
-  let query = supa
-    .from('attendance')
-    .select(`
+    const supa = this.supabase.getAdminClient();
+
+    // Build query with all possible filters
+    let query = supa
+      .from('attendance')
+      .select(`
       *,
       users!attendance_user_id_fkey (
         id,
@@ -1608,593 +1624,1628 @@ async generatePDFReport(dto: GenerateReportDto) {
         employee_id,
         designation,
         department,
-        profile_url
+        profile_url,
+        created_at
       )
     `)
-    .order('date', { ascending: false });
+      .order('date', { ascending: false });
 
-  // Apply filters
-  if (day) {
-    query = query.eq('date', day);
-  } else if (month) {
-    const start = `${month}-01`;
-    const end = new Date(
-      new Date(start).getFullYear(),
-      new Date(start).getMonth() + 1,
-      0
-    ).toISOString().slice(0, 10);
-    query = query.gte('date', start).lte('date', end);
-  } else if (startDate && endDate) {
-    query = query.gte('date', startDate).lte('date', endDate);
+    // Apply date filters
+    if (day) {
+      // Specific day filter
+      query = query.eq('date', day);
+      console.log(`PDF Report: Filtering by day: ${day}`);
+    } else if (month) {
+      // Month filter (e.g., "2024-12")
+      const [year, monthNum] = month.split('-');
+      const start = `${year}-${monthNum}-01`;
+      const end = new Date(
+        parseInt(year),
+        parseInt(monthNum), // Month is 0-indexed, so December is 11
+        0
+      ).toISOString().slice(0, 10);
+      query = query.gte('date', start).lte('date', end);
+      console.log(`PDF Report: Filtering by month: ${month} (${start} to ${end})`);
+    } else if (startDate && endDate) {
+      // Date range filter
+      query = query.gte('date', startDate).lte('date', endDate);
+      console.log(`PDF Report: Filtering by date range: ${startDate} to ${endDate}`);
+    } else if (startDate) {
+      // Single start date
+      query = query.gte('date', startDate);
+      console.log(`PDF Report: Filtering from date: ${startDate}`);
+    } else if (endDate) {
+      // Single end date
+      query = query.lte('date', endDate);
+      console.log(`PDF Report: Filtering to date: ${endDate}`);
+    }
+
+    // Apply employee filters
+    if (employeeId) {
+      query = query.eq('users.employee_id', employeeId);
+      console.log(`PDF Report: Filtering by employee ID: ${employeeId}`);
+    }
+
+    if (name) {
+      query = query.ilike('users.name', `%${name}%`);
+      console.log(`PDF Report: Filtering by name: ${name}`);
+    }
+
+    if (department) {
+      query = query.ilike('users.department', `%${department}%`);
+      console.log(`PDF Report: Filtering by department: ${department}`);
+    }
+
+    if (designation) {
+      query = query.ilike('users.designation', `%${designation}%`);
+      console.log(`PDF Report: Filtering by designation: ${designation}`);
+    }
+
+    // Apply status filter
+    if (status) {
+      const statusLower = status.toLowerCase();
+      switch (statusLower) {
+        case 'present':
+          query = query.eq('is_absent', false)
+            .not('check_in', 'is', null)
+            .not('check_out', 'is', null);
+          console.log(`PDF Report: Filtering by status: Present`);
+          break;
+        case 'absent':
+          query = query.eq('is_absent', true);
+          console.log(`PDF Report: Filtering by status: Absent`);
+          break;
+        case 'checked-in':
+          query = query.not('check_in', 'is', null)
+            .is('check_out', null)
+            .eq('is_absent', false);
+          console.log(`PDF Report: Filtering by status: Checked In`);
+          break;
+        case 'checked-out':
+          query = query.not('check_in', 'is', null)
+            .not('check_out', 'is', null)
+            .eq('is_absent', false);
+          console.log(`PDF Report: Filtering by status: Checked Out`);
+          break;
+        case 'half-day':
+          query = query.not('half_day_type', 'is', null)
+            .eq('is_absent', false);
+          console.log(`PDF Report: Filtering by status: Half Day`);
+          break;
+        case 'permission':
+          query = query.not('permission_time', 'is', null)
+            .eq('is_absent', false);
+          console.log(`PDF Report: Filtering by status: Permission`);
+          break;
+        case 'manual':
+          query = query.eq('manual_entry', true);
+          console.log(`PDF Report: Filtering by status: Manual Entry`);
+          break;
+        case 'auto':
+          query = query.eq('manual_entry', false);
+          console.log(`PDF Report: Filtering by status: Auto Entry`);
+          break;
+        default:
+          console.log(`PDF Report: Unknown status filter: ${status}`);
+      }
+    }
+
+    console.log(`PDF Report: Executing query with filters...`);
+
+    const { data, error } = await query;
+
+    if (error) {
+      console.error('Database error:', error);
+      throw new InternalServerErrorException(`Database error: ${error.message}`);
+    }
+
+    console.log(`PDF Report: Found ${data?.length || 0} records`);
+
+    if (!data || data.length === 0) {
+      throw new BadRequestException('No attendance data found for the selected filters');
+    }
+
+    // Process data for PDF with enhanced information
+    const processedData = data.map(record => {
+      const checkInTime = record.check_in ? this.parseTimeFromDateTime(record.check_in) : null;
+      const checkOutTime = record.check_out ? this.parseTimeFromDateTime(record.check_out) : null;
+
+      // Calculate late arrival (after 09:30 AM)
+      const isLateArrival = checkInTime ?
+        this.isLateArrival(checkInTime) : false;
+
+      // Calculate early departure (before 19:00 PM)
+      const isEarlyDeparture = checkOutTime ?
+        this.isEarlyDeparture(checkOutTime) : false;
+
+      return {
+        date: record.date,
+        employee_id: record.users?.employee_id ?? 'N/A',
+        name: record.users?.name ?? 'N/A',
+        department: record.users?.department ?? 'N/A',
+        designation: record.users?.designation ?? 'N/A',
+        email: record.users?.email ?? 'N/A',
+        check_in: this.toIST(record.check_in) || '-',
+        check_out: this.toIST(record.check_out) || '-',
+        check_in_raw: checkInTime,
+        check_out_raw: checkOutTime,
+        total_time: record.total_time_minutes != null
+          ? this.formatMinutesToHHMM(record.total_time_minutes)
+          : '00:00',
+        total_minutes: record.total_time_minutes || 0,
+        status: this.getStatus(record),
+        status_code: this.getStatus(record).toLowerCase().replace(/ /g, '-'),
+        is_absent: record.is_absent ? 'Yes' : 'No',
+        is_late_arrival: isLateArrival ? 'Yes' : 'No',
+        is_early_departure: isEarlyDeparture ? 'Yes' : 'No',
+        absence_reason: record.absence_reason?.substring(0, 100) || '-',
+        half_day_type: record.half_day_type || '-',
+        permission_time: record.permission_time || '-',
+        permission_duration: record.permission_duration_minutes != null
+          ? `${Math.floor(record.permission_duration_minutes / 60)}h ${record.permission_duration_minutes % 60}m`
+          : '-',
+        permission_reason: record.permission_reason?.substring(0, 100) || '-',
+        manual_entry: record.manual_entry ? 'Yes' : 'No',
+        entry_type: record.manual_entry ? 'Manual' : 'Auto',
+        notes: record.notes?.substring(0, 100) || '-',
+        created_at: this.toIST(record.created_at),
+        updated_at: this.toIST(record.updated_at),
+        user_created_at: record.users?.created_at ?
+          new Date(record.users.created_at).toLocaleDateString('en-IN') : 'N/A',
+      };
+    });
+
+    // Apply advanced filters on processed data
+    let filteredData = processedData;
+
+    if (lateArrivalsOnly) {
+      filteredData = filteredData.filter(r => r.is_late_arrival === 'Yes');
+      console.log(`PDF Report: Filtered to ${filteredData.length} late arrivals`);
+    }
+
+    if (earlyDeparturesOnly) {
+      filteredData = filteredData.filter(r => r.is_early_departure === 'Yes');
+      console.log(`PDF Report: Filtered to ${filteredData.length} early departures`);
+    }
+
+    if (filteredData.length === 0) {
+      throw new BadRequestException('No records match the additional filters (late arrivals/early departures)');
+    }
+
+    // Calculate comprehensive summary statistics
+    const summary = this.calculateComprehensiveSummary(filteredData);
+
+    // Group data by department if requested
+    let departmentGroups: any[] | null = null;
+    if (groupByDepartment) {
+      departmentGroups = this.groupByDepartment(filteredData);
+    }
+
+    // Create metadata object for PDF
+    const metadata = {
+      reportType,
+      filters: {
+        dateRange: startDate && endDate ? `${startDate} to ${endDate}` :
+          day ? `Day: ${day}` :
+            month ? `Month: ${month}` : 'All Dates',
+        employeeId: employeeId || 'All',
+        department: department || 'All',
+        name: name || 'All',
+        designation: designation || 'All',
+        status: status || 'All',
+        lateArrivalsOnly,
+        earlyDeparturesOnly,
+      },
+      startDate: startDate || day || (month ? `${month}-01` : null),
+      endDate: endDate || day || (month ? new Date(
+        new Date(`${month}-01`).getFullYear(),
+        new Date(`${month}-01`).getMonth() + 1,
+        0
+      ).toISOString().slice(0, 10) : null),
+      employeeId: employeeId || null,
+      department: department || null,
+      generatedAt: new Date().toLocaleString('en-IN', {
+        timeZone: 'Asia/Kolkata',
+        dateStyle: 'full',
+        timeStyle: 'medium'
+      }),
+      includeSummary,
+      includeCharts,
+      groupByDepartment,
+      totalFilteredRecords: filteredData.length,
+    };
+
+    console.log(`PDF Report: Generating ${reportType} PDF with ${filteredData.length} records`);
+
+    // Generate PDF based on report type
+    const pdfBuffer = reportType === 'summary'
+      ? await this.createSummaryPDF(filteredData, summary, metadata, departmentGroups, includeCharts)
+      : await this.createDetailedPDF(filteredData, summary, metadata, departmentGroups, includeCharts);
+
+    return {
+      pdfBuffer,
+      meta: {
+        filtersApplied: dto,
+        totalRecords: filteredData.length,
+        summary,
+        departmentGroups: groupByDepartment ? departmentGroups : null,
+        generatedAt: metadata.generatedAt,
+      },
+    };
   }
 
-  if (employeeId) {
-    query = query.eq('users.employee_id', employeeId);
+  // Update the PDF generation methods to accept new parameters
+  private async createSummaryPDF(
+    data: any[],
+    summary: any,
+    metadata: any,
+    departmentGroups?: any,
+    includeCharts?: boolean
+  ): Promise<Buffer> {
+    return new Promise((resolve, reject) => {
+      try {
+        const doc = new PDFDocument({ size: 'A4', margin: 40 });
+        const buffers: Buffer[] = [];
+
+        doc.on('data', buffers.push.bind(buffers));
+        doc.on('end', () => resolve(Buffer.concat(buffers)));
+
+        // Header
+        doc.fontSize(20).text('ATTENDANCE SUMMARY REPORT', { align: 'center' });
+        doc.moveDown(0.5);
+
+        // Report info
+        doc.fontSize(10)
+          .text(`Generated: ${metadata.generatedAt}`, { align: 'center' })
+          .text(`Filters: ${JSON.stringify(metadata.filters, null, 2)}`, { align: 'center' });
+        doc.moveDown();
+
+        // Summary statistics
+        doc.fontSize(16).text('SUMMARY STATISTICS', { underline: true });
+        doc.moveDown(0.5);
+
+        doc.fontSize(12).text(`Total Records: ${summary.totalRecords}`);
+        doc.fontSize(12).text(`Present: ${summary.byStatus.present} (${summary.percentages.presentRate}%)`);
+        doc.fontSize(12).text(`Absent: ${summary.byStatus.absent} (${summary.percentages.absentRate}%)`);
+        doc.fontSize(12).text(`Attendance Rate: ${summary.averages.attendanceRate}%`);
+        doc.fontSize(12).text(`Late Arrivals: ${summary.timing.lateArrivals}`);
+        doc.fontSize(12).text(`Early Departures: ${summary.timing.earlyDepartures}`);
+        doc.moveDown();
+
+        // Department groups if available
+        if (departmentGroups && departmentGroups.length > 0) {
+          doc.fontSize(16).text('DEPARTMENT-WISE SUMMARY', { underline: true });
+          doc.moveDown(0.5);
+
+          departmentGroups.forEach((dept: any, index: number) => {
+            doc.fontSize(12)
+              .text(`${index + 1}. ${dept.department} (${dept.recordCount} records, ${dept.employees} employees)`);
+          });
+          doc.moveDown();
+        }
+
+        // Footer
+        doc.fontSize(8)
+          .text(`Page 1 of 1`, { align: 'center' })
+          .text(`© Attendance Management System`, { align: 'center' });
+
+        doc.end();
+      } catch (err) {
+        reject(err);
+      }
+    });
   }
 
-  if (department) {
-    query = query.ilike('users.department', `%${department}%`);
-  }
-
-  const { data, error } = await query;
-
-  if (error) {
-    console.error('Database error:', error);
-    throw new InternalServerErrorException(error.message);
-  }
-
-  if (!data || data.length === 0) {
-    throw new BadRequestException('No attendance data found');
-  }
-
-  // Process data for PDF
-  const processedData = data.map(record => ({
-    date: record.date,
-    employee_id: record.users?.employee_id ?? 'N/A',
-    name: record.users?.name ?? 'N/A',
-    department: record.users?.department ?? 'N/A',
-    designation: record.users?.designation ?? 'N/A',
-    check_in: this.toIST(record.check_in) || '-',
-    check_out: this.toIST(record.check_out) || '-',
-    total_time: record.total_time_minutes != null
-      ? this.formatMinutesToHHMM(record.total_time_minutes)
-      : '00:00',
-    status: this.getStatus(record),
-    is_absent: record.is_absent ? 'Yes' : 'No',
-    absence_reason: record.absence_reason?.substring(0, 50) || '-',
-    half_day_type: record.half_day_type || '-',
-    permission_time: record.permission_time || '-',
-    permission_duration: record.permission_duration_minutes != null
-      ? `${Math.floor(record.permission_duration_minutes / 60)}h ${record.permission_duration_minutes % 60}m`
-      : '-',
-    permission_reason: record.permission_reason?.substring(0, 50) || '-',
-    manual_entry: record.manual_entry ? 'Yes' : 'No',
-    notes: record.notes?.substring(0, 50) || '-',
-    created_at: this.toIST(record.created_at),
-    updated_at: this.toIST(record.updated_at),
-  }));
-
-  // Calculate summary statistics
-  const summary = {
-    totalRecords: processedData.length,
-    present: processedData.filter(r => r.status === 'Present').length,
-    absent: processedData.filter(r => r.status === 'Absent').length,
-    halfDay: processedData.filter(r => r.status.includes('Half Day')).length,
-    permission: processedData.filter(r => r.status === 'Permission').length,
-    checkedIn: processedData.filter(r => r.status === 'Checked In').length,
-    notCheckedIn: processedData.filter(r => r.status === 'Not Checked In').length,
-  };
-
-  // Create metadata object for PDF
-  const metadata = {
-    reportType,
-    startDate: startDate || day || (month ? `${month}-01` : null),
-    endDate: endDate || day || (month ? new Date(
-      new Date(`${month}-01`).getFullYear(),
-      new Date(`${month}-01`).getMonth() + 1,
-      0
-    ).toISOString().slice(0, 10) : null),
-    employeeId: employeeId || null,
-    department: department || null,
-    generatedAt: new Date().toLocaleString('en-IN', {
-      timeZone: 'Asia/Kolkata',
-      dateStyle: 'medium',
-      timeStyle: 'medium'
-    }),
-  };
-
-  // Generate PDF based on report type
-  const pdfBuffer = reportType === 'summary' 
-    ? await this.createSummaryPDF(processedData, summary, metadata)
-    : await this.createDetailedPDF(processedData, summary, metadata);
-
-  return {
-    pdfBuffer,
-    meta: {
-      filtersApplied: dto,
-      totalRecords: processedData.length,
-      summary,
-    },
-  };
-}
-// Helper to create detailed PDF with better design
-private async createDetailedPDF(data: any[], summary: any, metadata: any): Promise<Buffer> {
+private async createDetailedPDF(
+  data: any[], 
+  summary: any, 
+  metadata: any, 
+  departmentGroups?: any, 
+  includeCharts?: boolean
+): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     try {
-      // Create PDF document with better margins
-      const doc = new PDFDocument({
-        size: 'A4',
-        layout: 'landscape',
+      const doc = new PDFDocument({ 
+        size: 'A4', 
         margin: 30,
-        bufferPages: true,
         font: 'Helvetica'
       });
-
       const buffers: Buffer[] = [];
+      
       doc.on('data', buffers.push.bind(buffers));
-      doc.on('end', () => {
-        const pdfData = Buffer.concat(buffers);
-        resolve(pdfData);
-      });
+      doc.on('end', () => resolve(Buffer.concat(buffers)));
+      doc.on('error', reject);
 
-      // ========== HEADER ==========
-      doc.rect(0, 0, doc.page.width, 80)
-        .fill('#1a237e'); // Deep blue header
-
+      // ==================== COVER PAGE ====================
+      doc.rect(0, 0, doc.page.width, doc.page.height)
+        .fill('#1a237e');
+      
       doc.fillColor('white')
-        .fontSize(24)
+        .fontSize(36)
         .font('Helvetica-Bold')
-        .text('ATTENDANCE REPORT', 30, 30, {
-          align: 'left',
-          width: doc.page.width - 60
-        });
+        .text('ATTENDANCE', 0, 150, { align: 'center' });
+      
+      doc.fontSize(24)
+        .text('ANALYSIS REPORT', 0, 200, { align: 'center' });
+      
+      doc.fontSize(14)
+        .text('Status-wise Detailed Analysis', 0, 280, { align: 'center' });
+      
+      doc.fontSize(12)
+        .text(`Period: ${metadata.filters.dateRange}`, 0, 320, { align: 'center' })
+        .text(`Total Records: ${metadata.totalFilteredRecords}`, 0, 340, { align: 'center' });
+      
+      doc.fontSize(10)
+        .text('Status Categories: Present • Absent • Half Day • Permission • Late Arrivals', 
+          0, doc.page.height - 100, { align: 'center' });
+      
+      doc.addPage();
 
-      doc.fillColor('white')
-        .fontSize(10)
-        .font('Helvetica')
-        .text('Generated by Attendance Management System', 30, 58, {
-          align: 'left'
-        });
-
-      // Company logo (placeholder)
-      doc.fillColor('white')
-        .fontSize(8)
-        .text('AMS', doc.page.width - 60, 30, {
-          align: 'right'
-        });
-
-      // ========== METADATA SECTION ==========
-      doc.y = 100;
-      doc.fillColor('#37474f')
-        .fontSize(11)
-        .font('Helvetica-Bold')
-        .text('Report Information', 30, doc.y);
-
-      doc.moveDown(0.3);
-
-      // Metadata table
-      const metadataTable = {
-        headers: ['Period', 'Employee ID', 'Department', 'Report Type', 'Generated On'],
-        data: [[
-          metadata.startDate && metadata.endDate 
-            ? `${metadata.startDate} to ${metadata.endDate}` 
-            : metadata.month || 'Custom Range',
-          metadata.employeeId || 'All',
-          metadata.department || 'All',
-          metadata.reportType.charAt(0).toUpperCase() + metadata.reportType.slice(1),
-          metadata.generatedAt
-        ]]
-      };
-
-      // Draw metadata table
-      doc.font('Helvetica');
-      const metadataX = 30;
-      let metadataY = doc.y;
-      const colWidths = [120, 80, 100, 80, 120];
-
-      // Draw headers
-      doc.fontSize(9).font('Helvetica-Bold');
-      metadataTable.headers.forEach((header, i) => {
-        doc.fillColor('#546e7a')
-          .text(header, metadataX + colWidths.slice(0, i).reduce((a, b) => a + b, 0), metadataY, {
-            width: colWidths[i],
-            align: 'left'
-          });
-      });
-
-      metadataY += 15;
-
-      // Draw data
-      doc.fontSize(9).font('Helvetica');
-      metadataTable.data.forEach(row => {
-        row.forEach((cell, i) => {
-          doc.fillColor('#263238')
-            .text(cell, metadataX + colWidths.slice(0, i).reduce((a, b) => a + b, 0), metadataY, {
-              width: colWidths[i],
-              align: 'left'
-            });
-        });
-        metadataY += 15;
-      });
-
-      doc.y = metadataY + 10;
-
-      // ========== SUMMARY SECTION ==========
-      if (summary) {
-        doc.fillColor('#1a237e')
-          .fontSize(12)
-          .font('Helvetica-Bold')
-          .text('SUMMARY STATISTICS', 30, doc.y);
-
-        doc.moveDown(0.5);
-
-        const summaryCards = [
-          { label: 'Total Records', value: summary.totalRecords, color: '#1565c0' },
-          { label: 'Present', value: summary.present, color: '#2e7d32' },
-          { label: 'Absent', value: summary.absent, color: '#c62828' },
-          { label: 'Half Day', value: summary.halfDay, color: '#f9a825' },
-          { label: 'Permission', value: summary.permission, color: '#6a1b9a' },
-          { label: 'Pending', value: summary.notCheckedIn, color: '#546e7a' }
-        ];
-
-        // Draw summary cards
-        let cardX = 30;
-        let cardY = doc.y;
-        const cardWidth = (doc.page.width - 80) / 3;
-        const cardHeight = 40;
-        let cardCount = 0;
-
-        summaryCards.forEach(card => {
-          // Draw card background
-          doc.roundedRect(cardX, cardY, cardWidth, cardHeight, 5)
-            .fill(card.color);
-
-          // Draw card content
-          doc.fillColor('white')
-            .fontSize(16)
-            .font('Helvetica-Bold')
-            .text(card.value.toString(), cardX + 15, cardY + 10, {
-              width: cardWidth - 30,
-              align: 'left'
-            });
-
-          doc.fillColor('white')
-            .fontSize(8)
-            .font('Helvetica')
-            .text(card.label.toUpperCase(), cardX + 15, cardY + 28, {
-              width: cardWidth - 30,
-              align: 'left'
-            });
-
-          cardX += cardWidth + 10;
-          cardCount++;
-
-          if (cardCount % 3 === 0) {
-            cardX = 30;
-            cardY += cardHeight + 10;
-          }
-        });
-
-        doc.y = cardY + cardHeight + 20;
-      }
-
-      // ========== ATTENDANCE DATA SECTION ==========
+      // ==================== STATUS SUMMARY DASHBOARD ====================
       doc.fillColor('#1a237e')
-        .fontSize(12)
+        .fontSize(20)
         .font('Helvetica-Bold')
-        .text('ATTENDANCE DETAILS', 30, doc.y);
+        .text('STATUS DASHBOARD', 30, 50);
+      
+      // Status statistics in boxes
+      const statusStats = [
+        { 
+          label: 'PRESENT', 
+          value: summary.byStatus?.present || 0, 
+          color: '#4CAF50',
+          icon: '✓',
+          bgColor: '#E8F5E9'
+        },
+        { 
+          label: 'ABSENT', 
+          value: summary.byStatus?.absent || 0, 
+          color: '#F44336',
+          icon: '✗',
+          bgColor: '#FFEBEE'
+        },
+        { 
+          label: 'HALF DAY', 
+          value: summary.byStatus?.halfDay || 0, 
+          color: '#FF9800',
+          icon: '½',
+          bgColor: '#FFF3E0'
+        },
+        { 
+          label: 'PERMISSION', 
+          value: summary.byStatus?.permission || 0, 
+          color: '#9C27B0',
+          icon: '⏰',
+          bgColor: '#F3E5F5'
+        },
+        { 
+          label: 'CHECKED IN', 
+          value: summary.byStatus?.checkedIn || 0, 
+          color: '#2196F3',
+          icon: '↪',
+          bgColor: '#E3F2FD'
+        },
+        { 
+          label: 'LATE ARRIVALS', 
+          value: summary.timing?.lateArrivals || 0, 
+          color: '#FF5722',
+          icon: '⌛',
+          bgColor: '#FBE9E7'
+        }
+      ];
+      
+      let statX = 30;
+      let statY = 90;
+      const statWidth = 80;
+      const statHeight = 70;
+      
+      statusStats.forEach((stat, index) => {
+        if (index > 0 && index % 3 === 0) {
+          statY += statHeight + 15;
+          statX = 30;
+        }
+        
+        // Stat box with background
+        doc.rect(statX, statY, statWidth, statHeight)
+          .fill(stat.bgColor)
+          .stroke(stat.color);
+        
+        // Icon
+        doc.fillColor(stat.color)
+          .fontSize(24)
+          .text(stat.icon, statX + statWidth/2, statY + 15, { align: 'center' });
+        
+        // Value
+        doc.fillColor('#263238')
+          .fontSize(18)
+          .font('Helvetica-Bold')
+          .text(stat.value.toString(), statX + statWidth/2, statY + 35, { align: 'center' });
+        
+        // Label
+        doc.fillColor('#666')
+          .fontSize(10)
+          .font('Helvetica')
+          .text(stat.label, statX + statWidth/2, statY + 55, { align: 'center' });
+        
+        statX += statWidth + 15;
+      });
 
-      doc.moveDown(0.5);
+      // ==================== PRESENT EMPLOYEES TABLE ====================
+      doc.addPage();
+      
+      // Present table header with background
+      doc.rect(30, 30, doc.page.width - 60, 40)
+        .fill('#E8F5E9')
+        .stroke('#4CAF50');
+      
+      doc.fillColor('#2E7D32')
+        .fontSize(18)
+        .font('Helvetica-Bold')
+        .text('✓ PRESENT EMPLOYEES', 40, 45);
+      
+      doc.fillColor('#388E3C')
+        .fontSize(11)
+        .text(`Total: ${summary.byStatus?.present || 0} records`, doc.page.width - 100, 45, { align: 'right' });
+      
+      // Present employees data
+      const presentRecords = data.filter(record => 
+        record.check_in && record.check_out && !record.is_absent && !record.half_day_type && !record.permission_time
+      );
+      
+      this.createStatusTable(doc, presentRecords, 'Present', 90, '#4CAF50', '#E8F5E9');
 
-      // Check if we need a new page for data
-      if (doc.y > 500) {
+      // ==================== ABSENT EMPLOYEES TABLE ====================
+      doc.addPage();
+      
+      // Absent table header with background
+      doc.rect(30, 30, doc.page.width - 60, 40)
+        .fill('#FFEBEE')
+        .stroke('#F44336');
+      
+      doc.fillColor('#C62828')
+        .fontSize(18)
+        .font('Helvetica-Bold')
+        .text('✗ ABSENT EMPLOYEES', 40, 45);
+      
+      doc.fillColor('#D32F2F')
+        .fontSize(11)
+        .text(`Total: ${summary.byStatus?.absent || 0} records`, doc.page.width - 100, 45, { align: 'right' });
+      
+      // Absent employees data
+      const absentRecords = data.filter(record => record.is_absent);
+      
+      this.createStatusTable(doc, absentRecords, 'Absent', 90, '#F44336', '#FFEBEE');
+
+      // ==================== HALF DAY EMPLOYEES TABLE ====================
+      doc.addPage();
+      
+      // Half Day table header with background
+      doc.rect(30, 30, doc.page.width - 60, 40)
+        .fill('#FFF3E0')
+        .stroke('#FF9800');
+      
+      doc.fillColor('#EF6C00')
+        .fontSize(18)
+        .font('Helvetica-Bold')
+        .text('½ HALF DAY EMPLOYEES', 40, 45);
+      
+      doc.fillColor('#F57C00')
+        .fontSize(11)
+        .text(`Total: ${summary.byStatus?.halfDay || 0} records`, doc.page.width - 100, 45, { align: 'right' });
+      
+      // Half Day employees data
+      const halfDayRecords = data.filter(record => record.half_day_type);
+      
+      this.createHalfDayTable(doc, halfDayRecords, 90, '#FF9800', '#FFF3E0');
+
+      // ==================== PERMISSION EMPLOYEES TABLE ====================
+      doc.addPage();
+      
+      // Permission table header with background
+      doc.rect(30, 30, doc.page.width - 60, 40)
+        .fill('#F3E5F5')
+        .stroke('#9C27B0');
+      
+      doc.fillColor('#7B1FA2')
+        .fontSize(18)
+        .font('Helvetica-Bold')
+        .text('⏰ PERMISSION EMPLOYEES', 40, 45);
+      
+      doc.fillColor('#8E24AA')
+        .fontSize(11)
+        .text(`Total: ${summary.byStatus?.permission || 0} records`, doc.page.width - 100, 45, { align: 'right' });
+      
+      // Permission employees data
+      const permissionRecords = data.filter(record => record.permission_time);
+      
+      this.createPermissionTable(doc, permissionRecords, 90, '#9C27B0', '#F3E5F5');
+
+      // ==================== LATE ARRIVALS TABLE ====================
+      doc.addPage();
+      
+      // Late Arrivals table header with background
+      doc.rect(30, 30, doc.page.width - 60, 40)
+        .fill('#FBE9E7')
+        .stroke('#FF5722');
+      
+      doc.fillColor('#D84315')
+        .fontSize(18)
+        .font('Helvetica-Bold')
+        .text('⌛ LATE ARRIVALS', 40, 45);
+      
+      doc.fillColor('#E64A19')
+        .fontSize(11)
+        .text(`Total: ${summary.timing?.lateArrivals || 0} records`, doc.page.width - 100, 45, { align: 'right' });
+      
+      // Late arrivals data
+      const lateRecords = data.filter(record => {
+        if (!record.check_in || record.is_absent) return false;
+        const checkInTime = new Date(record.check_in);
+        const hours = checkInTime.getHours();
+        const minutes = checkInTime.getMinutes();
+        return hours > 9 || (hours === 9 && minutes > 30);
+      });
+      
+      this.createLateArrivalsTable(doc, lateRecords, 90, '#FF5722', '#FBE9E7');
+
+      // ==================== CHECKED-IN (NOT CHECKED OUT) TABLE ====================
+      const checkedInRecords = data.filter(record => 
+        record.check_in && !record.check_out && !record.is_absent
+      );
+      
+      if (checkedInRecords.length > 0) {
         doc.addPage();
-        doc.y = 50;
+        
+        // Checked In table header with background
+        doc.rect(30, 30, doc.page.width - 60, 40)
+          .fill('#E3F2FD')
+          .stroke('#2196F3');
+        
+        doc.fillColor('#1565C0')
+          .fontSize(18)
+          .font('Helvetica-Bold')
+          .text('↪ CURRENTLY CHECKED IN', 40, 45);
+        
+        doc.fillColor('#1976D2')
+          .fontSize(11)
+          .text(`Total: ${checkedInRecords.length} employees`, doc.page.width - 100, 45, { align: 'right' });
+        
+        this.createCheckedInTable(doc, checkedInRecords, 90, '#2196F3', '#E3F2FD');
       }
 
-      // Table headers for detailed report
-      const headers = [
-        { label: 'Date', width: 60 },
-        { label: 'Emp ID', width: 60 },
-        { label: 'Name', width: 90 },
-        { label: 'Department', width: 70 },
-        { label: 'Check In', width: 60 },
-        { label: 'Check Out', width: 60 },
-        { label: 'Total Time', width: 60 },
-        { label: 'Status', width: 70 },
-        { label: 'Absent', width: 50 },
-        { label: 'Permission', width: 70 },
-        { label: 'Manual', width: 50 }
+      // ==================== DEPARTMENT-WISE SUMMARY ====================
+      doc.addPage();
+      
+      doc.rect(30, 30, doc.page.width - 60, 40)
+        .fill('#E0F7FA')
+        .stroke('#00BCD4');
+      
+      doc.fillColor('#00838F')
+        .fontSize(18)
+        .font('Helvetica-Bold')
+        .text('🏢 DEPARTMENT PERFORMANCE', 40, 45);
+      
+      if (departmentGroups && departmentGroups.length > 0) {
+        this.createDepartmentSummaryTable(doc, departmentGroups, 90);
+      } else {
+        doc.fillColor('#666')
+          .fontSize(12)
+          .text('No department data available', 40, 100);
+      }
+
+      // ==================== SUMMARY AND RECOMMENDATIONS ====================
+      doc.addPage();
+      
+      doc.rect(30, 30, doc.page.width - 60, 40)
+        .fill('#F1F8E9')
+        .stroke('#8BC34A');
+      
+      doc.fillColor('#558B2F')
+        .fontSize(18)
+        .font('Helvetica-Bold')
+        .text('📊 FINAL SUMMARY & INSIGHTS', 40, 45);
+      
+      // Overall statistics
+      const overallY = 100;
+      doc.fillColor('#1a237e')
+        .fontSize(14)
+        .text('Overall Attendance Statistics:', 40, overallY);
+      
+      const overallStats = [
+        `• Total Working Days Analyzed: ${data.length}`,
+        `• Overall Attendance Rate: ${summary.averages?.attendanceRate || 0}%`,
+        `• Average Working Hours: ${summary.averages?.averageWorkHours || 0} hours/day`,
+        `• Late Arrival Rate: ${summary.timing?.lateArrivalRate || 0}%`,
+        `• Manual Entries: ${summary.byEntryType?.manualEntries || 0} (${summary.byEntryType?.manualPercentage || 0}%)`,
+        `• Auto Entries: ${summary.byEntryType?.autoEntries || 0}`
       ];
-
-      const headerY = doc.y;
-      let currentY = headerY;
-
-      // Draw table headers with styling
-      doc.fontSize(8).font('Helvetica-Bold');
-      headers.forEach((header, i) => {
-        const xPos = 30 + headers.slice(0, i).reduce((sum, h) => sum + h.width, 0);
-        
-        // Header background
-        doc.rect(xPos, currentY, header.width, 20)
-          .fill('#e8eaf6');
-        
-        // Header text
-        doc.fillColor('#1a237e')
-          .text(header.label, xPos + 5, currentY + 6, {
-            width: header.width - 10,
-            align: 'center'
-          });
+      
+      doc.fillColor('#444')
+        .fontSize(11);
+      
+      overallStats.forEach((stat, i) => {
+        doc.text(stat, 50, overallY + 25 + i * 18);
       });
 
-      currentY += 20;
-
-      // Draw data rows with alternating colors
-      doc.fontSize(7).font('Helvetica');
-      data.forEach((row, rowIndex) => {
-        // Check if we need a new page
-        if (currentY > doc.page.height - 50) {
-          doc.addPage();
-          currentY = 50;
-          
-          // Redraw headers on new page
-          headers.forEach((header, i) => {
-            const xPos = 30 + headers.slice(0, i).reduce((sum, h) => sum + h.width, 0);
-            doc.rect(xPos, currentY, header.width, 20)
-              .fill('#e8eaf6');
-            doc.fillColor('#1a237e')
-              .fontSize(8).font('Helvetica-Bold')
-              .text(header.label, xPos + 5, currentY + 6, {
-                width: header.width - 10,
-                align: 'center'
-              });
-          });
-          currentY += 20;
-        }
-
-        // Alternate row colors
-        const rowColor = rowIndex % 2 === 0 ? '#fafafa' : '#ffffff';
-        
-        // Row data
-        const rowData = [
-          row.date,
-          row.employee_id,
-          row.name.substring(0, 20) + (row.name.length > 20 ? '...' : ''),
-          row.department.substring(0, 15) + (row.department.length > 15 ? '...' : ''),
-          row.check_in,
-          row.check_out,
-          row.total_time,
-          row.status.substring(0, 15) + (row.status.length > 15 ? '...' : ''),
-          row.is_absent,
-          row.permission_time !== '-' ? 'Yes' : 'No',
-          row.manual_entry
-        ];
-
-        // Draw row background
-        headers.forEach((header, i) => {
-          const xPos = 30 + headers.slice(0, i).reduce((sum, h) => sum + h.width, 0);
-          doc.rect(xPos, currentY, header.width, 15)
-            .fill(rowColor);
-        });
-
-        // Draw row data
-        rowData.forEach((cell, i) => {
-          const xPos = 30 + headers.slice(0, i).reduce((sum, h) => sum + h.width, 0);
-          
-          // Determine text color based on status
-          let textColor = '#263238';
-          if (headers[i].label === 'Status') {
-            if (cell.includes('Present')) textColor = '#2e7d32';
-            else if (cell.includes('Absent')) textColor = '#c62828';
-            else if (cell.includes('Half Day')) textColor = '#f9a825';
-            else if (cell.includes('Permission')) textColor = '#6a1b9a';
-          }
-
-          doc.fillColor(textColor)
-            .text(cell.toString(), xPos + 5, currentY + 4, {
-              width: headers[i].width - 10,
-              align: 'center'
-            });
-        });
-
-        currentY += 15;
+      // Recommendations box
+      const recY = overallY + 150;
+      doc.rect(40, recY, doc.page.width - 80, 120)
+        .fill('#FFF8E1')
+        .stroke('#FFC107');
+      
+      doc.fillColor('#FF8F00')
+        .fontSize(14)
+        .font('Helvetica-Bold')
+        .text('📋 RECOMMENDATIONS', 50, recY + 15);
+      
+      const recommendations = [
+        '1. Address high absenteeism through counseling sessions',
+        '2. Implement flexible working hours for departments with late arrivals',
+        '3. Recognize departments with >90% attendance rate',
+        '4. Automate attendance tracking for accuracy',
+        '5. Regular review of permission patterns'
+      ];
+      
+      doc.fillColor('#5D4037')
+        .fontSize(10);
+      
+      recommendations.forEach((rec, i) => {
+        doc.text(rec, 55, recY + 40 + i * 16);
       });
 
-      // Draw table borders
-      const tableWidth = headers.reduce((sum, h) => sum + h.width, 0);
-      doc.rect(30, headerY, tableWidth, currentY - headerY)
-        .stroke('#b0bec5');
-
-      // ========== FOOTER ==========
-      const pageCount = doc.bufferedPageRange().count;
-      for (let i = 0; i < pageCount; i++) {
+      // Footer on all pages
+      const totalPages = doc.bufferedPageRange().count;
+      for (let i = 0; i < totalPages; i++) {
         doc.switchToPage(i);
-        
-        // Footer background
-        doc.rect(0, doc.page.height - 40, doc.page.width, 40)
-          .fill('#f5f5f5');
         
         // Page number
-        doc.fillColor('#546e7a')
-          .fontSize(9)
-          .text(
-            `Page ${i + 1} of ${pageCount}`,
-            30,
-            doc.page.height - 30,
-            { align: 'left' }
-          );
-        
-        // Footer text
         doc.fillColor('#78909c')
           .fontSize(8)
           .text(
-            `Confidential - For Internal Use Only | Generated on ${metadata.generatedAt}`,
+            `Page ${i + 1} of ${totalPages}`,
             30,
-            doc.page.height - 15,
-            { align: 'left' }
+            doc.page.height - 20
           );
         
-        // Company info
-        doc.fillColor('#78909c')
-          .fontSize(8)
-          .text(
-            '© 2024 Attendance Management System',
-            doc.page.width - 200,
-            doc.page.height - 30,
-            { align: 'right' }
-          );
+        // Report title
+        doc.text(
+          'ATTENDANCE ANALYSIS REPORT',
+          doc.page.width / 2 - 60,
+          doc.page.height - 20
+        );
+        
+        // Confidential
+        doc.text(
+          'CONFIDENTIAL',
+          doc.page.width - 80,
+          doc.page.height - 20
+        );
       }
 
       doc.end();
     } catch (err) {
-      console.error('PDF Generation Error:', err);
       reject(err);
     }
   });
 }
 
-// Helper method for simple summary report
-private async createSummaryPDF(data: any[], summary: any, metadata: any): Promise<Buffer> {
-  return new Promise((resolve, reject) => {
-    try {
-      const doc = new PDFDocument({
-        size: 'A4',
-        margin: 40,
-        bufferPages: true,
-      });
+// ==================== HELPER METHODS FOR TABLES ====================
 
-      const buffers: Buffer[] = [];
-      doc.on('data', buffers.push.bind(buffers));
-      doc.on('end', () => {
-        const pdfData = Buffer.concat(buffers);
-        resolve(pdfData);
-      });
-
-      // Header with company branding
-      doc.fillColor('#1a237e')
-        .fontSize(24)
-        .font('Helvetica-Bold')
-        .text('ATTENDANCE SUMMARY REPORT', { align: 'center' });
-
-      doc.moveDown(0.5);
-      doc.fillColor('#546e7a')
-        .fontSize(10)
-        .text(`Period: ${metadata.startDate} to ${metadata.endDate}`, { align: 'center' });
+// Generic table creation for Present/Absent
+private createStatusTable(doc: any, records: any[], statusType: string, startY: number, 
+                         borderColor: string, rowColor: string) {
+  if (records.length === 0) {
+    doc.fillColor('#666')
+      .fontSize(12)
+      .text(`No ${statusType.toLowerCase()} records found`, 40, startY);
+    return;
+  }
+  
+  const headers = ['Date', 'Employee ID', 'Name', 'Department', 'Check In', 'Check Out', 'Total Hours'];
+  const colWidths = [60, 70, 80, 70, 60, 60, 50];
+  const headerX = 30;
+  const headerY = startY;
+  
+  // Table header with background
+  doc.rect(headerX, headerY, colWidths.reduce((a, b) => a + b), 25)
+    .fill(borderColor + '40') // Light version of border color
+    .stroke(borderColor);
+  
+  doc.fillColor('#fff')
+    .fontSize(10)
+    .font('Helvetica-Bold');
+  
+  headers.forEach((header, i) => {
+    doc.text(header, 
+      headerX + colWidths.slice(0, i).reduce((a, b) => a + b, 0) + 5, 
+      headerY + 8,
+      { width: colWidths[i] - 10 }
+    );
+  });
+  
+  // Table data
+  let tableY = headerY + 30;
+  doc.fillColor('#263238')
+    .fontSize(9);
+  
+  records.slice(0, 20).forEach((record, rowIndex) => {
+    if (tableY > doc.page.height - 50) {
+      doc.addPage();
+      tableY = 50;
+    }
+    
+    // Alternate row colors with highlight for current row
+    if (rowIndex % 2 === 0) {
+      doc.rect(headerX, tableY - 5, colWidths.reduce((a, b) => a + b), 20)
+        .fill(rowColor);
+    } else {
+      doc.rect(headerX, tableY - 5, colWidths.reduce((a, b) => a + b), 20)
+        .fill('#FFFFFF');
+    }
+    
+    // Highlight border for important rows
+    if (statusType === 'Absent' && record.absence_reason?.toLowerCase().includes('emergency')) {
+      doc.rect(headerX, tableY - 5, colWidths.reduce((a, b) => a + b), 20)
+        .stroke('#FF5722');
+    }
+    
+    const rowData = [
+      record.date,
+      record.users?.employee_id || 'N/A',
+      record.users?.name?.substring(0, 20) + (record.users?.name?.length > 20 ? '...' : '') || 'Unknown',
+      record.users?.department?.substring(0, 15) + (record.users?.department?.length > 15 ? '...' : '') || 'N/A',
+      this.toIST(record.check_in) || '--:--',
+      this.toIST(record.check_out) || '--:--',
+      record.total_time_minutes ? `${(record.total_time_minutes / 60).toFixed(1)}h` : '--'
+    ];
+    
+    rowData.forEach((cell, i) => {
+      const cellX = headerX + colWidths.slice(0, i).reduce((a, b) => a + b, 0) + 5;
+      const cellWidth = colWidths[i] - 10;
       
-      doc.text(`Generated: ${metadata.generatedAt}`, { align: 'center' });
-      doc.moveDown(1);
-
-      // Summary Statistics
-      doc.fillColor('#37474f')
-        .fontSize(16)
-        .text('Summary Statistics', { underline: true });
-      doc.moveDown(0.5);
-
-      const stats = [
-        `• Total Records: ${summary.totalRecords}`,
-        `• Present: ${summary.present} (${((summary.present / summary.totalRecords) * 100).toFixed(1)}%)`,
-        `• Absent: ${summary.absent} (${((summary.absent / summary.totalRecords) * 100).toFixed(1)}%)`,
-        `• Half Day: ${summary.halfDay} (${((summary.halfDay / summary.totalRecords) * 100).toFixed(1)}%)`,
-        `• Permission: ${summary.permission} (${((summary.permission / summary.totalRecords) * 100).toFixed(1)}%)`,
-        `• Checked In: ${summary.checkedIn}`,
-        `• Not Checked In: ${summary.notCheckedIn}`
-      ];
-
-      stats.forEach(stat => {
+      // Special formatting for absent reasons
+      if (statusType === 'Absent' && i === 2 && record.absence_reason) {
+        doc.fillColor('#D32F2F')
+          .font('Helvetica-Bold');
+        doc.text(cell + ' *', cellX, tableY, { width: cellWidth });
         doc.fillColor('#263238')
-          .fontSize(11)
-          .text(stat, { indent: 20 });
-      });
-
-      doc.moveDown(1);
-
-      // Simplified data table
-      if (data.length > 0) {
-        doc.fillColor('#37474f')
-          .fontSize(16)
-          .text('Attendance Overview', { underline: true });
-        doc.moveDown(0.5);
-
-        // Create a simpler table
-        const tableTop = doc.y;
-        const tableHeaders = ['Date', 'Employee', 'Check In', 'Check Out', 'Status'];
-        const colWidths = [80, 150, 80, 80, 100];
-
-        // Draw headers
-        doc.fontSize(10).font('Helvetica-Bold');
-        tableHeaders.forEach((header, i) => {
-          doc.fillColor('#1a237e')
-            .text(header, 40 + colWidths.slice(0, i).reduce((a, b) => a + b, 0), tableTop, {
-              width: colWidths[i],
-              align: 'left'
-            });
-        });
-
-        let y = tableTop + 20;
-        doc.font('Helvetica');
-
-        // Draw data (limit to first 30 rows for summary)
-        data.slice(0, 30).forEach((row, index) => {
-          if (y > doc.page.height - 100) {
-            doc.addPage();
-            y = 50;
-          }
-
-          const rowData = [
-            row.date,
-            `${row.name} (${row.employee_id})`,
-            row.check_in,
-            row.check_out,
-            row.status
-          ];
-
-          // Alternate row colors
-          const fillColor = index % 2 === 0 ? '#f5f5f5' : '#ffffff';
-          tableHeaders.forEach((_, i) => {
-            doc.rect(40 + colWidths.slice(0, i).reduce((a, b) => a + b, 0), y, colWidths[i], 15)
-              .fill(fillColor);
-          });
-
-          rowData.forEach((cell, i) => {
-            doc.fontSize(9)
-              .fillColor('#263238')
-              .text(cell.toString(), 45 + colWidths.slice(0, i).reduce((a, b) => a + b, 0), y + 3, {
-                width: colWidths[i] - 10,
-                align: 'left'
-              });
-          });
-
-          y += 15;
-        });
-
-        if (data.length > 30) {
-          doc.moveDown();
-          doc.fillColor('#546e7a')
-            .fontSize(9)
-            .text(`* Showing 30 of ${data.length} records. Use detailed report for complete data.`);
-        }
+          .font('Helvetica');
+      } else {
+        doc.fillColor('#263238');
+        doc.text(cell.toString(), cellX, tableY, { width: cellWidth });
       }
-
-      // Footer
-      const pageCount = doc.bufferedPageRange().count;
-      for (let i = 0; i < pageCount; i++) {
-        doc.switchToPage(i);
-        doc.fontSize(8)
-          .fillColor('#78909c')
-          .text(
-            `Page ${i + 1} of ${pageCount}`,
-            50,
-            doc.page.height - 30,
-            { align: 'center' }
-          );
-      }
-
-      doc.end();
-    } catch (err) {
-      reject(err);
+    });
+    
+    tableY += 20;
+  });
+  
+  // Add absent reason notes if any
+  if (statusType === 'Absent') {
+    const absentWithReasons = records.filter(r => r.absence_reason);
+    if (absentWithReasons.length > 0) {
+      doc.fillColor('#D32F2F')
+        .fontSize(8)
+        .text('* Includes employees with recorded absence reasons', 
+          headerX, tableY + 10);
     }
+  }
+}
+
+// Special table for Half Day
+private createHalfDayTable(doc: any, records: any[], startY: number, 
+                          borderColor: string, rowColor: string) {
+  if (records.length === 0) {
+    doc.fillColor('#666')
+      .fontSize(12)
+      .text('No half day records found', 40, startY);
+    return;
+  }
+  
+  const headers = ['Date', 'Employee', 'Half Day Type', 'Start Time', 'End Time', 'Duration', 'Notes'];
+  const colWidths = [60, 80, 50, 50, 50, 40, 70];
+  const headerX = 30;
+  const headerY = startY;
+  
+  // Table header
+  doc.rect(headerX, headerY, colWidths.reduce((a, b) => a + b), 25)
+    .fill(borderColor + '40')
+    .stroke(borderColor);
+  
+  doc.fillColor('#fff')
+    .fontSize(10)
+    .font('Helvetica-Bold');
+  
+  headers.forEach((header, i) => {
+    doc.text(header, 
+      headerX + colWidths.slice(0, i).reduce((a, b) => a + b, 0) + 5, 
+      headerY + 8,
+      { width: colWidths[i] - 10 }
+    );
+  });
+  
+  // Table data
+  let tableY = headerY + 30;
+  doc.fillColor('#263238')
+    .fontSize(9);
+  
+  records.slice(0, 20).forEach((record, rowIndex) => {
+    if (tableY > doc.page.height - 50) {
+      doc.addPage();
+      tableY = 50;
+    }
+    
+    // Color based on half day type
+    const typeColor = record.half_day_type === 'morning' ? '#FF9800' : '#FF5722';
+    const rowBgColor = rowIndex % 2 === 0 ? rowColor : '#FFFFFF';
+    
+    doc.rect(headerX, tableY - 5, colWidths.reduce((a, b) => a + b), 20)
+      .fill(rowBgColor);
+    
+    const rowData = [
+      record.date,
+      record.users?.name?.substring(0, 18) + (record.users?.name?.length > 18 ? '...' : '') || 'Unknown',
+      record.half_day_type?.toUpperCase() || 'N/A',
+      this.toIST(record.check_in) || '--:--',
+      this.toIST(record.check_out) || '--:--',
+      record.total_time_minutes ? `${(record.total_time_minutes / 60).toFixed(1)}h` : '--',
+      record.notes?.substring(0, 25) + (record.notes?.length > 25 ? '...' : '') || '-'
+    ];
+    
+    rowData.forEach((cell, i) => {
+      const cellX = headerX + colWidths.slice(0, i).reduce((a, b) => a + b, 0) + 5;
+      const cellWidth = colWidths[i] - 10;
+      
+      // Highlight half day type
+      if (i === 2) {
+        doc.fillColor(typeColor)
+          .font('Helvetica-Bold');
+      } else {
+        doc.fillColor('#263238');
+      }
+      
+      doc.text(cell.toString(), cellX, tableY, { width: cellWidth });
+    });
+    
+    tableY += 20;
   });
 }
+
+// Special table for Permission
+private createPermissionTable(doc: any, records: any[], startY: number, 
+                            borderColor: string, rowColor: string) {
+  if (records.length === 0) {
+    doc.fillColor('#666')
+      .fontSize(12)
+      .text('No permission records found', 40, startY);
+    return;
+  }
+  
+  const headers = ['Date', 'Employee', 'Permission Time', 'Duration', 'Reason', 'Deduction', 'Status'];
+  const colWidths = [60, 80, 60, 40, 80, 50, 40];
+  const headerX = 30;
+  const headerY = startY;
+  
+  // Table header
+  doc.rect(headerX, headerY, colWidths.reduce((a, b) => a + b), 25)
+    .fill(borderColor + '40')
+    .stroke(borderColor);
+  
+  doc.fillColor('#fff')
+    .fontSize(10)
+    .font('Helvetica-Bold');
+  
+  headers.forEach((header, i) => {
+    doc.text(header, 
+      headerX + colWidths.slice(0, i).reduce((a, b) => a + b, 0) + 5, 
+      headerY + 8,
+      { width: colWidths[i] - 10 }
+    );
+  });
+  
+  // Table data
+  let tableY = headerY + 30;
+  doc.fillColor('#263238')
+    .fontSize(9);
+  
+  records.slice(0, 20).forEach((record, rowIndex) => {
+    if (tableY > doc.page.height - 50) {
+      doc.addPage();
+      tableY = 50;
+    }
+    
+    const rowBgColor = rowIndex % 2 === 0 ? rowColor : '#FFFFFF';
+    const deduction = record.permission_duration_minutes || 0;
+    const deductionHours = (deduction / 60).toFixed(1);
+    
+    doc.rect(headerX, tableY - 5, colWidths.reduce((a, b) => a + b), 20)
+      .fill(rowBgColor);
+    
+    const rowData = [
+      record.date,
+      record.users?.name?.substring(0, 18) + (record.users?.name?.length > 18 ? '...' : '') || 'Unknown',
+      record.permission_time || '--:--',
+      `${deductionHours}h`,
+      record.permission_reason?.substring(0, 30) + (record.permission_reason?.length > 30 ? '...' : '') || '-',
+      deduction > 120 ? 'High' : deduction > 60 ? 'Medium' : 'Low',
+      'Applied'
+    ];
+    
+    rowData.forEach((cell, i) => {
+      const cellX = headerX + colWidths.slice(0, i).reduce((a, b) => a + b, 0) + 5;
+      const cellWidth = colWidths[i] - 10;
+      
+      // Color code deduction level
+      if (i === 5) {
+        const deductionColor = cell === 'High' ? '#F44336' : 
+                              cell === 'Medium' ? '#FF9800' : '#4CAF50';
+        doc.fillColor(deductionColor)
+          .font('Helvetica-Bold');
+      } else if (i === 6) {
+        doc.fillColor('#4CAF50')
+          .font('Helvetica-Bold');
+      } else {
+        doc.fillColor('#263238');
+      }
+      
+      doc.text(cell.toString(), cellX, tableY, { width: cellWidth });
+    });
+    
+    tableY += 20;
+  });
+}
+
+// Special table for Late Arrivals
+private createLateArrivalsTable(doc: any, records: any[], startY: number, 
+                               borderColor: string, rowColor: string) {
+  if (records.length === 0) {
+    doc.fillColor('#666')
+      .fontSize(12)
+      .text('No late arrival records found', 40, startY);
+    return;
+  }
+  
+  const headers = ['Date', 'Employee', 'Check In Time', 'Late By', 'Department', 'Status', 'Pattern'];
+  const colWidths = [60, 80, 60, 40, 60, 50, 40];
+  const headerX = 30;
+  const headerY = startY;
+  
+  // Table header
+  doc.rect(headerX, headerY, colWidths.reduce((a, b) => a + b), 25)
+    .fill(borderColor + '40')
+    .stroke(borderColor);
+  
+  doc.fillColor('#fff')
+    .fontSize(10)
+    .font('Helvetica-Bold');
+  
+  headers.forEach((header, i) => {
+    doc.text(header, 
+      headerX + colWidths.slice(0, i).reduce((a, b) => a + b, 0) + 5, 
+      headerY + 8,
+      { width: colWidths[i] - 10 }
+    );
+  });
+  
+  // Table data
+  let tableY = headerY + 30;
+  doc.fillColor('#263238')
+    .fontSize(9);
+  
+  records.slice(0, 20).forEach((record, rowIndex) => {
+    if (tableY > doc.page.height - 50) {
+      doc.addPage();
+      tableY = 50;
+    }
+    
+    const checkInTime = new Date(record.check_in);
+    const lateByMinutes = (checkInTime.getHours() - 9) * 60 + (checkInTime.getMinutes() - 30);
+    const lateBy = lateByMinutes > 0 ? `${lateByMinutes}m` : '0m';
+    
+    const rowBgColor = rowIndex % 2 === 0 ? rowColor : '#FFFFFF';
+    
+    doc.rect(headerX, tableY - 5, colWidths.reduce((a, b) => a + b), 20)
+      .fill(rowBgColor);
+    
+    // Highlight severe lateness (>60 minutes)
+    if (lateByMinutes > 60) {
+      doc.rect(headerX, tableY - 5, colWidths.reduce((a, b) => a + b), 20)
+        .stroke('#D84315');
+    }
+    
+    const rowData = [
+      record.date,
+      record.users?.name?.substring(0, 18) + (record.users?.name?.length > 18 ? '...' : '') || 'Unknown',
+      this.toIST(record.check_in) || '--:--',
+      lateBy,
+      record.users?.department?.substring(0, 15) + (record.users?.department?.length > 15 ? '...' : '') || 'N/A',
+      this.getStatus(record),
+      lateByMinutes > 60 ? 'Severe' : lateByMinutes > 30 ? 'Moderate' : 'Minor'
+    ];
+    
+    rowData.forEach((cell, i) => {
+      const cellX = headerX + colWidths.slice(0, i).reduce((a, b) => a + b, 0) + 5;
+      const cellWidth = colWidths[i] - 10;
+      
+      // Color code based on lateness
+      if (i === 3 || i === 6) {
+        let cellColor = '#4CAF50';
+        if (cell === 'Severe' || parseInt(cell) > 60) cellColor = '#F44336';
+        else if (cell === 'Moderate' || (parseInt(cell) > 30 && parseInt(cell) <= 60)) cellColor = '#FF9800';
+        
+        doc.fillColor(cellColor)
+          .font('Helvetica-Bold');
+      } else {
+        doc.fillColor('#263238');
+      }
+      
+      doc.text(cell.toString(), cellX, tableY, { width: cellWidth });
+    });
+    
+    tableY += 20;
+  });
+}
+
+// Special table for Checked In (Not Checked Out)
+private createCheckedInTable(doc: any, records: any[], startY: number, 
+                            borderColor: string, rowColor: string) {
+  if (records.length === 0) return;
+  
+  const headers = ['Date', 'Employee', 'Check In Time', 'Current Status', 'Department', 'Hours Since', 'Action'];
+  const colWidths = [60, 80, 60, 60, 60, 50, 40];
+  const headerX = 30;
+  const headerY = startY;
+  
+  // Table header
+  doc.rect(headerX, headerY, colWidths.reduce((a, b) => a + b), 25)
+    .fill(borderColor + '40')
+    .stroke(borderColor);
+  
+  doc.fillColor('#fff')
+    .fontSize(10)
+    .font('Helvetica-Bold');
+  
+  headers.forEach((header, i) => {
+    doc.text(header, 
+      headerX + colWidths.slice(0, i).reduce((a, b) => a + b, 0) + 5, 
+      headerY + 8,
+      { width: colWidths[i] - 10 }
+    );
+  });
+  
+  // Table data
+  let tableY = headerY + 30;
+  doc.fillColor('#263238')
+    .fontSize(9);
+  
+  records.slice(0, 15).forEach((record, rowIndex) => {
+    if (tableY > doc.page.height - 50) {
+      doc.addPage();
+      tableY = 50;
+    }
+    
+    const checkInTime = new Date(record.check_in);
+    const now = new Date();
+    const hoursSince = Math.floor((now.getTime() - checkInTime.getTime()) / (1000 * 60 * 60));
+    
+    const rowBgColor = rowIndex % 2 === 0 ? rowColor : '#FFFFFF';
+    
+    doc.rect(headerX, tableY - 5, colWidths.reduce((a, b) => a + b), 20)
+      .fill(rowBgColor);
+    
+    // Highlight if checked in for more than 10 hours
+    if (hoursSince > 10) {
+      doc.rect(headerX, tableY - 5, colWidths.reduce((a, b) => a + b), 20)
+        .stroke('#D84315');
+    }
+    
+    const rowData = [
+      record.date,
+      record.users?.name?.substring(0, 18) + (record.users?.name?.length > 18 ? '...' : '') || 'Unknown',
+      this.toIST(record.check_in) || '--:--',
+      'Active',
+      record.users?.department?.substring(0, 15) + (record.users?.department?.length > 15 ? '...' : '') || 'N/A',
+      `${hoursSince}h`,
+      hoursSince > 10 ? 'Follow Up' : 'Monitor'
+    ];
+    
+    rowData.forEach((cell, i) => {
+      const cellX = headerX + colWidths.slice(0, i).reduce((a, b) => a + b, 0) + 5;
+      const cellWidth = colWidths[i] - 10;
+      
+      // Color code hours since
+      if (i === 5 || i === 6) {
+        let cellColor = '#4CAF50';
+        if (cell === 'Follow Up' || parseInt(cell) > 10) cellColor = '#F44336';
+        else if (parseInt(cell) > 8) cellColor = '#FF9800';
+        
+        doc.fillColor(cellColor)
+          .font('Helvetica-Bold');
+      } else if (i === 3) {
+        doc.fillColor('#2196F3')
+          .font('Helvetica-Bold');
+      } else {
+        doc.fillColor('#263238');
+      }
+      
+      doc.text(cell.toString(), cellX, tableY, { width: cellWidth });
+    });
+    
+    tableY += 20;
+  });
+}
+
+// Department Summary Table
+private createDepartmentSummaryTable(doc: any, departmentGroups: any[], startY: number) {
+  const headers = ['Department', 'Employees', 'Records', 'Present', 'Absent', 'Rate', 'Performance'];
+  const colWidths = [80, 50, 50, 50, 50, 50, 60];
+  const headerX = 30;
+  const headerY = startY;
+  
+  // Table header
+  doc.rect(headerX, headerY, colWidths.reduce((a, b) => a + b), 25)
+    .fill('#00BCD4' + '40')
+    .stroke('#00BCD4');
+  
+  doc.fillColor('#fff')
+    .fontSize(10)
+    .font('Helvetica-Bold');
+  
+  headers.forEach((header, i) => {
+    doc.text(header, 
+      headerX + colWidths.slice(0, i).reduce((a, b) => a + b, 0) + 5, 
+      headerY + 8,
+      { width: colWidths[i] - 10 }
+    );
+  });
+  
+  // Table data
+  let tableY = headerY + 30;
+  doc.fillColor('#263238')
+    .fontSize(9);
+  
+  departmentGroups.slice(0, 15).forEach((dept: any, rowIndex) => {
+    if (tableY > doc.page.height - 50) {
+      doc.addPage();
+      tableY = 50;
+    }
+    
+    const attendanceRate = dept.summary?.averages?.attendanceRate || 0;
+    let performance = 'Excellent';
+    let rowColor = '#E8F5E9';
+    
+    if (attendanceRate < 60) {
+      performance = 'Poor';
+      rowColor = '#FFEBEE';
+    } else if (attendanceRate < 80) {
+      performance = 'Average';
+      rowColor = '#FFF3E0';
+    } else if (attendanceRate < 90) {
+      performance = 'Good';
+      rowColor = '#E3F2FD';
+    }
+    
+    // Alternate row background
+    if (rowIndex % 2 === 0) {
+      doc.rect(headerX, tableY - 5, colWidths.reduce((a, b) => a + b), 20)
+        .fill(rowColor);
+    } else {
+      doc.rect(headerX, tableY - 5, colWidths.reduce((a, b) => a + b), 20)
+        .fill('#FFFFFF');
+    }
+    
+    const rowData = [
+      dept.department?.substring(0, 20) + (dept.department?.length > 20 ? '...' : '') || 'Unknown',
+      dept.employees || 0,
+      dept.recordCount || 0,
+      dept.summary?.byStatus?.present || 0,
+      dept.summary?.byStatus?.absent || 0,
+      `${attendanceRate}%`,
+      performance
+    ];
+    
+    rowData.forEach((cell, i) => {
+      const cellX = headerX + colWidths.slice(0, i).reduce((a, b) => a + b, 0) + 5;
+      const cellWidth = colWidths[i] - 10;
+      
+      // Color code performance
+      if (i === 6) {
+        let cellColor = '#4CAF50';
+        if (cell === 'Poor') cellColor = '#F44336';
+        else if (cell === 'Average') cellColor = '#FF9800';
+        else if (cell === 'Good') cellColor = '#2196F3';
+        
+        doc.fillColor(cellColor)
+          .font('Helvetica-Bold');
+      } else if (i === 5) {
+        // Color code attendance rate
+        let cellColor = '#4CAF50';
+        const rate = parseInt(cell);
+        if (rate < 60) cellColor = '#F44336';
+        else if (rate < 80) cellColor = '#FF9800';
+        else if (rate < 90) cellColor = '#2196F3';
+        
+        doc.fillColor(cellColor)
+          .font('Helvetica-Bold');
+      } else {
+        doc.fillColor('#263238');
+      }
+      
+      doc.text(cell.toString(), cellX, tableY, { width: cellWidth });
+    });
+    
+    tableY += 20;
+  });
+}
+
+// Helper method to format time for display
+private formatTimeForPDF(datetime: any): string {
+  if (!datetime) return '--:--';
+  try {
+    const date = new Date(datetime);
+    if (isNaN(date.getTime())) return '--:--';
+    
+    const hours = date.getHours();
+    const minutes = date.getMinutes();
+    const period = hours >= 12 ? 'PM' : 'AM';
+    const displayHours = hours % 12 || 12;
+    
+    return `${displayHours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')} ${period}`;
+  } catch {
+    return '--:--';
+  }
+}
+
+// Helper method to get employee name safely
+private getEmployeeName(record: any): string {
+  if (record.users?.name) return record.users.name;
+  if (record.user_info?.name) return record.user_info.name;
+  return 'Unknown Employee';
+}
+
+// Helper method to get employee department safely
+private getEmployeeDepartment(record: any): string {
+  if (record.users?.department) return record.users.department;
+  if (record.user_info?.department) return record.user_info.department;
+  return 'N/A';
+}
+
+// Helper method to get employee ID safely
+private getEmployeeId(record: any): string {
+  if (record.users?.employee_id) return record.users.employee_id;
+  if (record.user_info?.employee_id) return record.user_info.employee_id;
+  return 'N/A';
+}
+
+// Helper method: Group data by week
+private groupDataByWeek(data: any[]) {
+  const weeks: { [key: string]: any } = {};
+  
+  data.forEach(record => {
+    const date = new Date(record.date);
+    const weekStart = new Date(date);
+    weekStart.setDate(date.getDate() - date.getDay()); // Start of week (Sunday)
+    
+    const weekKey = weekStart.toISOString().slice(0, 10);
+    
+    if (!weeks[weekKey]) {
+      weeks[weekKey] = {
+        weekLabel: `Week ${weekStart.getDate()}/${weekStart.getMonth() + 1}`,
+        days: 0,
+        present: 0,
+        absent: 0,
+        late: 0,
+        totalHours: 0,
+        records: []
+      };
+    }
+    
+    weeks[weekKey].days++;
+    if (record.is_absent) {
+      weeks[weekKey].absent++;
+    } else if (record.check_in && record.check_out) {
+      weeks[weekKey].present++;
+      weeks[weekKey].totalHours += (record.total_time_minutes || 0) / 60;
+    }
+    
+    // Check for late arrival (after 9:30 AM)
+    if (record.check_in) {
+      const checkInTime = new Date(record.check_in);
+      const hours = checkInTime.getHours();
+      const minutes = checkInTime.getMinutes();
+      if (hours > 9 || (hours === 9 && minutes > 30)) {
+        weeks[weekKey].late++;
+      }
+    }
+  });
+  
+  // Calculate averages
+  Object.values(weeks).forEach((week: any) => {
+    week.avgHours = week.present > 0 ? (week.totalHours / week.present).toFixed(1) : 0;
+    week.attendanceRate = week.days > 0 ? Math.round((week.present / week.days) * 100) : 0;
+  });
+  
+  return Object.values(weeks).sort((a: any, b: any) => 
+    new Date(b.weekKey || 0).getTime() - new Date(a.weekKey || 0).getTime()
+  );
+}
+
+// Helper method: Group data by employee
+private groupDataByEmployee(data: any[]) {
+  const employees: { [key: string]: any } = {};
+  
+  data.forEach(record => {
+    const employeeId = record.users?.employee_id || record.user_id;
+    
+    if (!employees[employeeId]) {
+      employees[employeeId] = {
+        name: record.users?.name || 'Unknown',
+        department: record.users?.department || 'N/A',
+        totalDays: 0,
+        present: 0,
+        absent: 0,
+        late: 0,
+        totalHours: 0,
+        records: []
+      };
+    }
+    
+    employees[employeeId].totalDays++;
+    if (record.is_absent) {
+      employees[employeeId].absent++;
+    } else if (record.check_in && record.check_out) {
+      employees[employeeId].present++;
+      employees[employeeId].totalHours += (record.total_time_minutes || 0) / 60;
+    }
+    
+    // Check for late arrival
+    if (record.check_in) {
+      const checkInTime = new Date(record.check_in);
+      const hours = checkInTime.getHours();
+      const minutes = checkInTime.getMinutes();
+      if (hours > 9 || (hours === 9 && minutes > 30)) {
+        employees[employeeId].late++;
+      }
+    }
+    
+    employees[employeeId].records.push(record);
+  });
+  
+  // Calculate averages and rates
+  Object.values(employees).forEach((emp: any) => {
+    emp.avgHours = emp.present > 0 ? (emp.totalHours / emp.present).toFixed(1) : 0;
+    emp.attendanceRate = emp.totalDays > 0 ? Math.round((emp.present / emp.totalDays) * 100) : 0;
+  });
+  
+  return employees;
+}
+
+// Helper method: Get best department
+private getBestDepartment(departmentGroups?: any[]): string {
+  if (!departmentGroups || departmentGroups.length === 0) {
+    return 'N/A';
+  }
+  
+  const bestDept = departmentGroups.reduce((best, current) => {
+    const bestRate = best.summary?.averages?.attendanceRate || 0;
+    const currentRate = current.summary?.averages?.attendanceRate || 0;
+    return currentRate > bestRate ? current : best;
+  });
+  
+  return bestDept.department || 'N/A';
+}
+  // Helper methods (add these to your service class)
+  private parseTimeFromDateTime(dateTime: string | Date): string | null {
+    if (!dateTime) return null;
+
+    try {
+      const date = new Date(dateTime);
+      if (isNaN(date.getTime())) return null;
+
+      return date.toLocaleTimeString('en-IN', {
+        hour12: false,
+        hour: '2-digit',
+        minute: '2-digit'
+      });
+    } catch {
+      return null;
+    }
+  }
+
+  private isLateArrival(timeStr: string): boolean {
+    if (!timeStr) return false;
+
+    try {
+      const [hours, minutes] = timeStr.split(':').map(Number);
+      const totalMinutes = hours * 60 + minutes;
+
+      // Late if after 9:30 AM (9*60 + 30 = 570 minutes)
+      return totalMinutes > 570;
+    } catch {
+      return false;
+    }
+  }
+
+  private isEarlyDeparture(timeStr: string): boolean {
+    if (!timeStr) return false;
+
+    try {
+      const [hours, minutes] = timeStr.split(':').map(Number);
+      const totalMinutes = hours * 60 + minutes;
+
+      // Early if before 19:00 (19*60 = 1140 minutes)
+      return totalMinutes < 1140 && totalMinutes > 0;
+    } catch {
+      return false;
+    }
+  }
+
+  private calculateComprehensiveSummary(data: any[]) {
+    const totalRecords = data.length;
+
+    // Count by status
+    const present = data.filter(r => r.status_code === 'present').length;
+    const absent = data.filter(r => r.status_code === 'absent').length;
+    const checkedIn = data.filter(r => r.status_code === 'checked-in').length;
+    const halfDay = data.filter(r => r.status_code.includes('half-day')).length;
+    const permission = data.filter(r => r.status_code === 'permission').length;
+
+    // Count by entry type
+    const manualEntries = data.filter(r => r.entry_type === 'Manual').length;
+    const autoEntries = data.filter(r => r.entry_type === 'Auto').length;
+
+    // Calculate timing statistics
+    const lateArrivals = data.filter(r => r.is_late_arrival === 'Yes').length;
+    const earlyDepartures = data.filter(r => r.is_early_departure === 'Yes').length;
+
+    // Calculate average work hours
+    const presentRecords = data.filter(r =>
+      r.status_code === 'present' || r.status_code === 'checked-out'
+    );
+    const totalWorkMinutes = presentRecords.reduce((sum, r) => sum + (r.total_minutes || 0), 0);
+    const averageWorkHours = presentRecords.length > 0
+      ? Number((totalWorkMinutes / presentRecords.length / 60).toFixed(2))
+      : 0;
+
+    // Calculate percentages
+    const attendanceRate = totalRecords > 0
+      ? Number(((present + checkedIn + halfDay + permission) / totalRecords * 100).toFixed(2))
+      : 0;
+
+    const lateArrivalRate = totalRecords > 0
+      ? Number((lateArrivals / totalRecords * 100).toFixed(2))
+      : 0;
+
+    const earlyDepartureRate = totalRecords > 0
+      ? Number((earlyDepartures / totalRecords * 100).toFixed(2))
+      : 0;
+
+    return {
+      totalRecords,
+      byStatus: {
+        present,
+        absent,
+        checkedIn,
+        halfDay,
+        permission,
+        notCheckedIn: totalRecords - (present + absent + checkedIn + halfDay + permission),
+      },
+      byEntryType: {
+        manualEntries,
+        autoEntries,
+        manualPercentage: totalRecords > 0 ? Number((manualEntries / totalRecords * 100).toFixed(2)) : 0,
+      },
+      timing: {
+        lateArrivals,
+        earlyDepartures,
+        lateArrivalRate,
+        earlyDepartureRate,
+      },
+      averages: {
+        averageWorkHours,
+        attendanceRate,
+      },
+      percentages: {
+        presentRate: totalRecords > 0 ? Number((present / totalRecords * 100).toFixed(2)) : 0,
+        absentRate: totalRecords > 0 ? Number((absent / totalRecords * 100).toFixed(2)) : 0,
+      },
+    };
+  }
+
+  private groupByDepartment(data: any[]) {
+    const groups: { [key: string]: any[] } = {};
+
+    data.forEach(record => {
+      const dept = record.department || 'Unknown';
+      if (!groups[dept]) {
+        groups[dept] = [];
+      }
+      groups[dept].push(record);
+    });
+
+    // Convert to array and calculate department statistics
+    const result = Object.entries(groups).map(([department, records]) => {
+      const deptSummary = this.calculateComprehensiveSummary(records);
+
+      return {
+        department,
+        recordCount: records.length,
+        summary: deptSummary,
+        employees: [...new Set(records.map(r => r.employee_id))].length,
+        records: records.slice(0, 10), // Include first 10 records for preview
+      };
+    }).sort((a, b) => b.recordCount - a.recordCount);
+
+    return result;
+  }
+
+
+  // Update the DTO interface to include new parameters
+  // In your attendance.dto.ts file, update GenerateReportDto:
+  /*
+  export class GenerateReportDto {
+    @IsOptional()
+    @IsString()
+    startDate?: string;
+  
+    @IsOptional()
+    @IsString()
+    endDate?: string;
+  
+    @IsOptional()
+    @IsString()
+    day?: string;
+  
+    @IsOptional()
+    @IsString()
+    month?: string;
+  
+    @IsOptional()
+    @IsString()
+    employeeId?: string;
+  
+    @IsOptional()
+    @IsString()
+    department?: string;
+  
+    @IsOptional()
+    @IsString()
+    @IsIn(['detailed', 'summary'])
+    reportType?: string;
+  
+    @IsOptional()
+    @IsString()
+    name?: string;
+  
+    @IsOptional()
+    @IsString()
+    status?: string;
+  
+    @IsOptional()
+    @IsString()
+    designation?: string;
+  
+    @IsOptional()
+    @IsBoolean()
+    lateArrivalsOnly?: boolean;
+  
+    @IsOptional()
+    @IsBoolean()
+    earlyDeparturesOnly?: boolean;
+  
+    @IsOptional()
+    @IsBoolean()
+    includeSummary?: boolean;
+  
+    @IsOptional()
+    @IsBoolean()
+    groupByDepartment?: boolean;
+  
+    @IsOptional()
+    @IsBoolean()
+    includeCharts?: boolean;
+  }
+  */
+  // Helper to create detailed PDF with better design
+
 
 
   // ✅ NEW: Bulk calculate attendance for specific time period
@@ -2385,28 +3436,28 @@ private async createSummaryPDF(data: any[], summary: any, metadata: any): Promis
     }
   }
   // ✅ Get dashboard statistics
- // In your AttendanceService.ts file, update the getDashboardStats method:
+  // In your AttendanceService.ts file, update the getDashboardStats method:
 
-async getDashboardStats(date?: string) {
-  try {
-    const supa = this.supabase.getAdminClient();
-    const targetDate = date || this.todayDate();
+  async getDashboardStats(date?: string) {
+    try {
+      const supa = this.supabase.getAdminClient();
+      const targetDate = date || this.todayDate();
 
-    // Get total users count (only users with role 'user', not 'admin')
-    const { count: totalUsers, error: usersError } = await supa
-      .from('users')
-      .select('*', { count: 'exact', head: true })
-      .eq('role', 'user');
+      // Get total users count (only users with role 'user', not 'admin')
+      const { count: totalUsers, error: usersError } = await supa
+        .from('users')
+        .select('*', { count: 'exact', head: true })
+        .eq('role', 'user');
 
-    if (usersError) {
-      console.error('Error fetching users count:', usersError);
-      throw new InternalServerErrorException('Failed to fetch users count');
-    }
+      if (usersError) {
+        console.error('Error fetching users count:', usersError);
+        throw new InternalServerErrorException('Failed to fetch users count');
+      }
 
-    // Get today's attendance - FIXED query
-    const { data: attendanceData, error: attendanceError } = await supa
-      .from('attendance')
-      .select(`
+      // Get today's attendance - FIXED query
+      const { data: attendanceData, error: attendanceError } = await supa
+        .from('attendance')
+        .select(`
         *,
         users!attendance_user_id_fkey (
           id,
@@ -2414,51 +3465,51 @@ async getDashboardStats(date?: string) {
           role
         )
       `)
-      .eq('date', targetDate);
+        .eq('date', targetDate);
 
-    if (attendanceError) {
-      console.error('Error fetching attendance:', attendanceError);
-      throw new InternalServerErrorException('Failed to fetch attendance data');
+      if (attendanceError) {
+        console.error('Error fetching attendance:', attendanceError);
+        throw new InternalServerErrorException('Failed to fetch attendance data');
+      }
+
+      // Filter attendance records to only include users with role 'user' (not 'admin')
+      const filteredAttendance = attendanceData.filter(record =>
+        record.users?.role === 'user'
+      );
+
+      // Calculate statistics
+      const presentToday = filteredAttendance.filter(a =>
+        !a.is_absent && a.check_in
+      ).length;
+
+      const absentToday = filteredAttendance.filter(a =>
+        a.is_absent
+      ).length;
+
+      const checkedInToday = filteredAttendance.filter(a =>
+        a.check_in && !a.check_out
+      ).length;
+
+      const checkedOutToday = filteredAttendance.filter(a =>
+        a.check_in && a.check_out
+      ).length;
+
+      return {
+        date: targetDate,
+        total_users: totalUsers || 0,
+        today_attendance: filteredAttendance.length,
+        present_today: presentToday,
+        absent_today: absentToday,
+        checked_in_today: checkedInToday,
+        checked_out_today: checkedOutToday,
+        pending_today: Math.max(0, (totalUsers || 0) - filteredAttendance.length)
+      };
+    } catch (err) {
+      console.error('getDashboardStats error:', err);
+      if (err instanceof BadRequestException) throw err;
+      throw new InternalServerErrorException('Failed to fetch dashboard statistics');
     }
-
-    // Filter attendance records to only include users with role 'user' (not 'admin')
-    const filteredAttendance = attendanceData.filter(record => 
-      record.users?.role === 'user'
-    );
-
-    // Calculate statistics
-    const presentToday = filteredAttendance.filter(a => 
-      !a.is_absent && a.check_in
-    ).length;
-    
-    const absentToday = filteredAttendance.filter(a => 
-      a.is_absent
-    ).length;
-    
-    const checkedInToday = filteredAttendance.filter(a => 
-      a.check_in && !a.check_out
-    ).length;
-    
-    const checkedOutToday = filteredAttendance.filter(a => 
-      a.check_in && a.check_out
-    ).length;
-
-    return {
-      date: targetDate,
-      total_users: totalUsers || 0,
-      today_attendance: filteredAttendance.length,
-      present_today: presentToday,
-      absent_today: absentToday,
-      checked_in_today: checkedInToday,
-      checked_out_today: checkedOutToday,
-      pending_today: Math.max(0, (totalUsers || 0) - filteredAttendance.length)
-    };
-  } catch (err) {
-    console.error('getDashboardStats error:', err);
-    if (err instanceof BadRequestException) throw err;
-    throw new InternalServerErrorException('Failed to fetch dashboard statistics');
   }
-}
 
   async getAllAttendanceWithFilters(filters: {
     startDate?: string;

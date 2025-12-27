@@ -17,6 +17,7 @@ import {
 import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth } from '@nestjs/swagger';
 import type { Response, Request } from 'express';
 import { AttendanceService } from './attendance.service';
+import PDFDocument = require('pdfkit');
 import { 
   CheckInDto, 
   CheckOutDto, 
@@ -446,4 +447,169 @@ async generatePDFReport(
 
     return csvContent;
   }
+
+
+
+// In your AttendanceController.ts
+@Post('filter-pdf')
+@UseGuards(RolesGuard)
+@Roles('admin')
+@ApiOperation({ summary: 'Generate PDF from filter parameters' })
+async generatePDFFromFilterParameters(
+  @Body() filterDto: AttendanceFilterDto,
+  @Res() response: Response
+) {
+  try {
+    // Convert filter DTO to report DTO
+    const reportDto: GenerateReportDto = {
+      startDate: filterDto.startDate,
+      endDate: filterDto.endDate,
+      employeeId: filterDto.employeeId,
+      department: filterDto.department,
+      reportType: 'detailed' // or 'summary'
+    };
+    
+    // Add additional filters from the filter DTO if needed
+    if (filterDto.name) {
+      // Note: You might need to modify your generatePDFReport method to support name filter
+    }
+    
+    // Use existing PDF generation method
+    const { pdfBuffer, meta } = await this.attendanceService.generatePDFReport(reportDto);
+    
+    const filename = `attendance_${filterDto.startDate || 'all'}_to_${filterDto.endDate || 'all'}_${Date.now()}.pdf`;
+    
+    response.setHeader('Content-Type', 'application/pdf');
+    response.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    response.setHeader('X-Filter-Meta', encodeURIComponent(JSON.stringify(filterDto)));
+    
+    response.send(pdfBuffer);
+  } catch (error) {
+    this.logger.error('Filter PDF generation error:', error);
+    throw error;
+  }
+}
+
+// Helper method to convert filtered data to PDF
+private async convertFilteredDataToPDF(data: any[], filters: any): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    try {
+      const doc = new PDFDocument({ size: 'A4', margin: 40 });
+      const buffers: Buffer[] = [];
+      
+      doc.on('data', buffers.push.bind(buffers));
+      doc.on('end', () => resolve(Buffer.concat(buffers)));
+      
+      // Header
+      doc.fontSize(20).text('Filtered Attendance Report', { align: 'center' });
+      doc.moveDown();
+      
+      // Filter info
+      doc.fontSize(12).text('Applied Filters:');
+      if (filters.startDate && filters.endDate) {
+        doc.fontSize(10).text(`Date Range: ${filters.startDate} to ${filters.endDate}`);
+      }
+      if (filters.employeeId) {
+        doc.text(`Employee ID: ${filters.employeeId}`);
+      }
+      if (filters.department) {
+        doc.text(`Department: ${filters.department}`);
+      }
+      if (filters.status) {
+        doc.text(`Status: ${filters.status}`);
+      }
+      if (filters.name) {
+        doc.text(`Name: ${filters.name}`);
+      }
+      doc.moveDown();
+      
+      // Data count
+      doc.text(`Total Records: ${data.length}`);
+      doc.moveDown(2);
+      
+      // Table headers
+      const headers = ['Date', 'Emp ID', 'Name', 'Dept', 'Check In', 'Check Out', 'Status'];
+      const colWidths = [80, 60, 80, 60, 60, 60, 80];
+      
+      let yPos = doc.y;
+      
+      // Draw headers
+      headers.forEach((header, i) => {
+        doc.fontSize(10).font('Helvetica-Bold')
+          .text(header, 40 + colWidths.slice(0, i).reduce((a, b) => a + b, 0), yPos, {
+            width: colWidths[i],
+            align: 'left'
+          });
+      });
+      
+      yPos += 20;
+      
+      // Draw data rows
+      doc.fontSize(9).font('Helvetica');
+      data.forEach((row, index) => {
+        if (yPos > doc.page.height - 100) {
+          doc.addPage();
+          yPos = 50;
+        }
+        
+        const rowData = [
+          row.date,
+          row.user_info?.employee_id || 'N/A',
+          row.user_info?.name || 'N/A',
+          row.user_info?.department || 'N/A',
+          row.check_in_ist || '-',
+          row.check_out_ist || '-',
+          row.status
+        ];
+        
+        rowData.forEach((cell, i) => {
+          doc.text(cell.toString(), 40 + colWidths.slice(0, i).reduce((a, b) => a + b, 0), yPos, {
+            width: colWidths[i] - 10,
+            align: 'left'
+          });
+        });
+        
+        yPos += 15;
+      });
+      
+      // Footer
+      doc.text(`Generated on: ${new Date().toLocaleString()}`, 40, doc.page.height - 40);
+      doc.text(`Page 1 of 1`, 40, doc.page.height - 25);
+      
+      doc.end();
+    } catch (error) {
+      reject(error);
+    }
+  });
+}
+
+
+@Get('filter-or-pdf')
+@ApiOperation({ summary: 'Get filtered data or PDF based on format parameter' })
+async filterOrPDF(
+  @Query() filters: AttendanceFilterDto,
+  @Query('format') format: string = 'json',
+  @Res() response: Response
+) {
+  try {
+    const result = await this.attendanceService.getAllAttendanceWithFilters(filters);
+    
+    if (format.toLowerCase() === 'pdf') {
+      // Generate PDF
+      const pdfBuffer = await this.convertFilteredDataToPDF(result.data, filters);
+      
+      const filename = `attendance_${filters.startDate || 'all'}_to_${filters.endDate || 'all'}.pdf`;
+      response.setHeader('Content-Type', 'application/pdf');
+      response.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+      response.send(pdfBuffer);
+    } else {
+      // Return JSON
+      return result;
+    }
+  } catch (error) {
+    this.logger.error(`Filter/PDF error: ${error.message}`, error.stack);
+    throw error;
+  }
+}
+
 }

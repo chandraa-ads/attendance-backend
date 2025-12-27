@@ -425,24 +425,22 @@ export class PermissionTimeDto {
 }
 // ✅ NEW: Generate Report DTO
 export class GenerateReportDto {
-  // Date filters
   @IsOptional()
-  @IsDateString()
-  startDate?: string; // YYYY-MM-DD
-
-  @IsOptional()
-  @IsDateString()
-  endDate?: string; // YYYY-MM-DD
-
-  @IsOptional()
-  @IsDateString()
-  day?: string; // YYYY-MM-DD (single day)
+  @IsString()
+  startDate?: string;
 
   @IsOptional()
   @IsString()
-  month?: string; // YYYY-MM (ex: 2025-12)
+  endDate?: string;
 
-  // Other filters
+  @IsOptional()
+  @IsString()
+  day?: string;
+
+  @IsOptional()
+  @IsString()
+  month?: string;
+
   @IsOptional()
   @IsString()
   employeeId?: string;
@@ -452,8 +450,41 @@ export class GenerateReportDto {
   department?: string;
 
   @IsOptional()
-  @IsEnum(['summary', 'detailed'])
-  reportType?: 'summary' | 'detailed';
+  @IsString()
+  @IsIn(['detailed', 'summary'])
+  reportType?: string;
+
+  @IsOptional()
+  @IsString()
+  name?: string;
+
+  @IsOptional()
+  @IsString()
+  status?: string;
+
+  @IsOptional()
+  @IsString()
+  designation?: string;
+
+  @IsOptional()
+  @IsBoolean()
+  lateArrivalsOnly?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
+  earlyDeparturesOnly?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
+  includeSummary?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
+  groupByDepartment?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
+  includeCharts?: boolean;
 }
 
 // ✅ NEW: Bulk Calculate DTO
