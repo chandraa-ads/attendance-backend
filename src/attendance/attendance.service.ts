@@ -4176,7 +4176,7 @@ export class AttendanceService {
     }
   }
 
- async getAllAttendanceWithFilters(filters: {
+async getAllAttendanceWithFilters(filters: {
   startDate?: string;
   endDate?: string;
   name?: string;
@@ -4416,27 +4416,12 @@ export class AttendanceService {
       return 0;
     });
 
-    // Apply pagination
-    const page = Math.max(1, filters.page || 1);
-    const limit = Math.min(100, Math.max(1, filters.limit || 20));
-    const from = (page - 1) * limit;
-    const to = Math.min(from + limit, filteredData.length);
-    
-    const paginatedData = filteredData.slice(from, to);
-
     // Calculate summary statistics
     const summary = this.calculateAttendanceSummary(allAttendanceData);
 
     return {
-      data: paginatedData,
-      pagination: {
-        page,
-        limit,
-        total: filteredData.length,
-        total_pages: Math.ceil(filteredData.length / limit),
-        has_next: to < filteredData.length,
-        has_prev: page > 1
-      },
+      data: filteredData, // Return ALL filtered data without pagination
+      pagination: null, // No pagination when limit is removed
       filters: {
         ...filters,
         applied_filters: Object.keys(filters).filter(key => filters[key] !== undefined && key !== 'page' && key !== 'limit' && key !== 'sortBy' && key !== 'sortOrder')
@@ -4490,8 +4475,10 @@ private getDetailedStatus(record: any): { label: string, code: string } {
 
   return { label: 'Pending', code: 'pending' };
 }
+
+
   // Calculate summary statistics
- private calculateAttendanceSummary(data: any[]) {
+private calculateAttendanceSummary(data: any[]) {
   const total = data.length;
   const present = data.filter(d => d.status_code === 'present').length;
   const absent = data.filter(d => d.status_code === 'absent').length;
