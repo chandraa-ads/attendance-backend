@@ -35,7 +35,15 @@ import {
 } from './dto/attendance.dto';
 import { RolesGuard } from '../auth/roles.guard';
 import { Roles } from '../auth/roles.decorator';
-
+interface HolidayResponse {
+  message: string;
+  date: string;
+  total_users: number;
+  affected_users: number;
+  failed_users: number;
+  results: Array<{ user: string; employee_id: string; success: boolean }>;
+  errors?: Array<{ user: string; error: string }>;
+}
 @ApiTags('Attendance')
 @Controller('attendance')
 @ApiBearerAuth()
@@ -350,6 +358,25 @@ async generatePDFReport(
   response.send(pdfBuffer);
 }
 
+  // ✅ NEW: Mark today as holiday for all users
+ @Post('mark-today-holiday')
+  @UseGuards(RolesGuard)
+  @Roles('admin')
+  @ApiOperation({ summary: 'Admin: Mark today as holiday for all users' })
+  @ApiResponse({ status: 200, description: 'Today marked as holiday successfully' })
+  @ApiResponse({ status: 403, description: 'Admin access required' })
+  @ApiResponse({ status: 500, description: 'Internal server error' })
+  async markTodayAsHoliday(): Promise<HolidayResponse> {
+    try {
+      this.logger.log('Mark today as holiday request received');
+      const result = await this.attendanceService.markTodayAsHoliday();
+      this.logger.log(`Mark today as holiday completed: ${result.affected_users} users affected`);
+      return result;
+    } catch (error) {
+      this.logger.error(`Mark today as holiday error: ${error.message}`, error.stack);
+      throw error;
+    }
+  }
 
   // ✅ NEW: Bulk calculate attendance for specific time
   @Post('bulk-calculate')
@@ -395,7 +422,8 @@ async generatePDFReport(
         'Permission time tracking',
         'PDF report generation',
         'Advanced filtering',
-        'Previous data updates'
+        'Previous data updates',
+        'Mark today as holiday'
       ]
     };
   }

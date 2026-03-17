@@ -9,6 +9,26 @@ import {
   GenerateReportDto
 } from './dto/attendance.dto';
 import PDFDocument = require('pdfkit');
+interface HolidaySuccessResult {
+  user: string;
+  employee_id: string;
+  success: boolean;
+}
+
+interface HolidayErrorResult {
+  user: string;
+  error: string;
+}
+
+interface HolidayResult {
+  message: string;
+  date: string;
+  total_users: number;
+  affected_users: number;
+  failed_users: number;
+  results: HolidaySuccessResult[];
+  errors?: HolidayErrorResult[];
+}
 @Injectable()
 export class AttendanceService {
   constructor(private readonly supabase: SupabaseService) { }
@@ -41,6 +61,107 @@ export class AttendanceService {
     }
   }
 
+
+   async markTodayAsHoliday(): Promise<HolidayResult> {
+    console.log('=== MARK TODAY AS HOLIDAY START ===');
+    
+    try {
+      const supa = this.supabase.getAdminClient();
+      const today = this.todayDate();
+      
+      console.log(`Marking ${today} as holiday for all users`);
+      
+      // Get all users with role 'user'
+      const { data: users, error: usersError } = await supa
+        .from('users')
+        .select('id, name, email, employee_id')
+        .eq('role', 'user');
+      
+      if (usersError) {
+        console.error('Error fetching users:', usersError);
+        throw new InternalServerErrorException('Failed to fetch users');
+      }
+      
+      console.log(`Found ${users.length} users to mark as holiday`);
+      
+      const results: HolidaySuccessResult[] = [];
+      const errors: HolidayErrorResult[] = [];
+      
+      // Process each user
+      for (const user of users) {
+        try {
+          // Check if attendance record already exists for today
+          const { data: existing } = await supa
+            .from('attendance')
+            .select('id')
+            .eq('user_id', user.id)
+            .eq('date', today)
+            .single();
+          
+          const attendanceData = {
+            user_id: user.id,
+            date: today,
+            check_in: null,
+            check_out: null,
+            is_absent: false,
+            is_holiday: true,
+            absence_reason: 'Public Holiday',
+            total_time_minutes: null,
+            manual_entry: true,
+            updated_at: new Date().toISOString()
+          };
+          
+          let result;
+          if (existing) {
+            result = await supa
+              .from('attendance')
+              .update(attendanceData)
+              .eq('id', existing.id)
+              .select()
+              .single();
+          } else {
+            result = await supa
+              .from('attendance')
+              .insert([attendanceData])
+              .select()
+              .single();
+          }
+          
+          if (result.error) {
+            errors.push({ user: user.email, error: result.error.message });
+          } else {
+            results.push({ 
+              user: user.email, 
+              employee_id: user.employee_id,
+              success: true 
+            });
+          }
+        } catch (err) {
+          errors.push({ user: user.email, error: err.message });
+        }
+      }
+      
+      console.log('=== MARK TODAY AS HOLIDAY COMPLETE ===');
+      console.log(`Success: ${results.length}, Failed: ${errors.length}`);
+      
+      return {
+        message: `Successfully marked ${today} as holiday`,
+        date: today,
+        total_users: users.length,
+        affected_users: results.length,
+        failed_users: errors.length,
+        results,
+        errors: errors.length > 0 ? errors : undefined
+      };
+      
+    } catch (err) {
+      console.error('=== MARK TODAY AS HOLIDAY ERROR ===');
+      console.error('Error:', err);
+      
+      if (err instanceof BadRequestException) throw err;
+      throw new InternalServerErrorException('Failed to mark today as holiday: ' + err.message);
+    }
+  }
   // Format duration between two dates as HH:mm:ss
   private formatDuration(start: Date | string, end: Date | string): string | null {
     try {
@@ -335,76 +456,78 @@ export class AttendanceService {
   }
 
   async getAll(filters: {
-    date?: string;
-    name?: string;
-    employeeId?: string;
-    checkInFrom?: string;
-    checkOutTo?: string;
-    status?: string;
-  }) {
-    try {
-      const supa = this.supabase.getAdminClient();
+  date?: string;
+  name?: string;
+  employeeId?: string;
+  checkInFrom?: string;
+  checkOutTo?: string;
+  status?: string;
+}) {
+  try {
+    const supa = this.supabase.getAdminClient();
 
-      // Specify the exact relationship using users!attendance_user_id_fkey
-      let query = supa
-        .from('attendance')
-        .select(`
-          *,
-          users!attendance_user_id_fkey (
-            id, name, email, employee_id, designation, profile_url, role
-          )
-        `);
+    // Specify the exact relationship using users!attendance_user_id_fkey
+    let query = supa
+      .from('attendance')
+      .select(`
+        *,
+        users!attendance_user_id_fkey (
+          id, name, email, employee_id, designation, profile_url, role
+        )
+      `);
 
-      if (filters.date) {
-        const date = new Date(filters.date);
-        if (isNaN(date.getTime())) {
-          throw new BadRequestException('Invalid date format');
-        }
-        query = query.eq('date', filters.date);
+    // Apply date filter
+    if (filters.date) {
+      const date = new Date(filters.date);
+      if (isNaN(date.getTime())) {
+        throw new BadRequestException('Invalid date format');
       }
+      query = query.eq('date', filters.date);
+    }
 
-      if (filters.name) {
-        query = query.ilike('users!attendance_user_id_fkey.name', `%${filters.name}%`);
-      }
+    // Apply name filter
+    if (filters.name) {
+      query = query.ilike('users!attendance_user_id_fkey.name', `%${filters.name}%`);
+    }
 
-      if (filters.employeeId) {
-        query = query.ilike('users!attendance_user_id_fkey.employee_id', `%${filters.employeeId}%`);
-      }
+    // Apply employee ID filter
+    if (filters.employeeId) {
+      query = query.ilike('users!attendance_user_id_fkey.employee_id', `%${filters.employeeId}%`);
+    }
 
-      if (filters.checkInFrom) {
-        const checkInDate = filters.date || this.todayDate();
-        query = query.gte('check_in', `${checkInDate}T${filters.checkInFrom}:00Z`);
-      }
+    // Apply check-in time filter
+    if (filters.checkInFrom) {
+      const checkInDate = filters.date || this.todayDate();
+      query = query.gte('check_in', `${checkInDate}T${filters.checkInFrom}:00Z`);
+    }
 
-      if (filters.checkOutTo) {
-        const checkOutDate = filters.date || this.todayDate();
-        query = query.lte('check_out', `${checkOutDate}T${filters.checkOutTo}:00Z`);
-      }
+    // Apply check-out time filter
+    if (filters.checkOutTo) {
+      const checkOutDate = filters.date || this.todayDate();
+      query = query.lte('check_out', `${checkOutDate}T${filters.checkOutTo}:00Z`);
+    }
 
-      const { data, error } = await query.order('date', { ascending: false });
+    const { data, error } = await query.order('date', { ascending: false });
 
-      if (error) {
-        console.error('Error fetching all attendance:', error);
-        throw new InternalServerErrorException('Failed to fetch attendance records');
-      }
+    if (error) {
+      console.error('Error fetching all attendance:', error);
+      throw new InternalServerErrorException('Failed to fetch attendance records');
+    }
 
-      // Apply status filter if provided
-      let filteredData = data;
-      if (filters.status && filters.status.trim() !== '') {
-        filteredData = data.filter(record => {
-          const status = this.getStatus(record);
-          return status.toLowerCase().replace(' ', '-') === filters.status!.toLowerCase();
-        });
-      }
-
-      return filteredData.map((record) => ({
+    // Process each record to add status and formatted fields
+    let processedData = data.map((record) => {
+      const statusDetail = this.getDetailedStatus(record);
+      
+      return {
         ...record,
         check_in_ist: this.toIST(record.check_in),
         check_out_ist: this.toIST(record.check_out),
         total_time_formatted: record.check_in && record.check_out
           ? this.formatDuration(record.check_in, record.check_out)
           : (record.is_absent ? '00:00:00' : null),
-        status: this.getStatus(record),
+        status: statusDetail.label,
+        status_code: statusDetail.code,
+        is_holiday: record.is_holiday || false,
         manual_entry: record.manual_entry || false,
         user_info: {
           id: record.users?.id,
@@ -415,13 +538,26 @@ export class AttendanceService {
           profile_url: record.users?.profile_url,
           role: record.users?.role
         }
-      }));
-    } catch (err) {
-      console.error('getAll attendance error:', err);
-      if (err instanceof BadRequestException) throw err;
-      throw new InternalServerErrorException('Failed to fetch attendance records');
+      };
+    });
+
+    // Apply status filter if provided (filter on processed data)
+    if (filters.status && filters.status.trim() !== '') {
+      const statusLower = filters.status.toLowerCase();
+      processedData = processedData.filter(record => {
+        // Match status code or status label
+        return record.status_code === statusLower || 
+               record.status.toLowerCase().replace(' ', '-') === statusLower;
+      });
     }
+
+    return processedData;
+  } catch (err) {
+    console.error('getAll attendance error:', err);
+    if (err instanceof BadRequestException) throw err;
+    throw new InternalServerErrorException('Failed to fetch attendance records');
   }
+}
 
   async getAttendanceByEmployeeId(employeeId: string) {
     if (!employeeId) {
@@ -1579,45 +1715,44 @@ export class AttendanceService {
     const minutes = Math.floor(totalMinutes % 60);
     return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
   }
+// ✅ NEW: Generate PDF report with improved design and user statistics
+async generatePDFReport(dto: GenerateReportDto & {
+  name?: string;
+  status?: string;
+  designation?: string;
+  lateArrivalsOnly?: boolean;
+  earlyDeparturesOnly?: boolean;
+  includeSummary?: boolean;
+  groupByDepartment?: boolean;
+  includeCharts?: boolean;
+}) {
+  console.log('=== GENERATE PDF REPORT START ===');
+  console.log('Filters DTO:', JSON.stringify(dto, null, 2));
 
-  // ✅ NEW: Generate PDF report with improved design and user statistics
-  async generatePDFReport(dto: GenerateReportDto & {
-    name?: string;
-    status?: string;
-    designation?: string;
-    lateArrivalsOnly?: boolean;
-    earlyDeparturesOnly?: boolean;
-    includeSummary?: boolean;
-    groupByDepartment?: boolean;
-    includeCharts?: boolean;
-  }) {
-    console.log('=== GENERATE PDF REPORT START ===');
-    console.log('Filters DTO:', JSON.stringify(dto, null, 2));
+  const {
+    startDate,
+    endDate,
+    day,
+    month,
+    employeeId,
+    department,
+    name,
+    status,
+    designation,
+    lateArrivalsOnly = false,
+    earlyDeparturesOnly = false,
+    includeSummary = true,
+    groupByDepartment = false,
+    includeCharts = false,
+    reportType = 'detailed',
+  } = dto;
 
-    const {
-      startDate,
-      endDate,
-      day,
-      month,
-      employeeId,
-      department,
-      name,
-      status,
-      designation,
-      lateArrivalsOnly = false,
-      earlyDeparturesOnly = false,
-      includeSummary = true,
-      groupByDepartment = false,
-      includeCharts = false,
-      reportType = 'detailed',
-    } = dto;
+  const supa = this.supabase.getAdminClient();
 
-    const supa = this.supabase.getAdminClient();
-
-    // Build query with all possible filters
-    let query = supa
-      .from('attendance')
-      .select(`
+  // Build query with all possible filters
+  let query = supa
+    .from('attendance')
+    .select(`
       *,
       users!attendance_user_id_fkey (
         id,
@@ -1630,565 +1765,623 @@ export class AttendanceService {
         created_at
       )
     `)
-      .order('date', { ascending: false });
+    .order('date', { ascending: false });
 
-    // In generatePDFReport method, replace the date filtering section:
+  // Apply date filters
+  if (day) {
+    // Specific day filter
+    query = query.eq('date', day);
+    console.log(`PDF Report: Filtering by day: ${day}`);
+  } else if (month) {
+    // Month filter (e.g., "2024-12")
+    const [year, monthNum] = month.split('-');
+    const start = `${year}-${monthNum}-01`;
+    const endDate = new Date(parseInt(year), parseInt(monthNum), 0); // Last day of month
+    const end = endDate.toISOString().slice(0, 10);
+    query = query.gte('date', start).lte('date', end);
+    console.log(`PDF Report: Filtering by month: ${month} (${start} to ${end})`);
+  } else if (startDate && endDate) {
+    // Date range filter
+    const start = new Date(startDate);
+    const end = new Date(endDate);
 
-    // Apply date filters
-    if (day) {
-      // Specific day filter
-      query = query.eq('date', day);
-      console.log(`PDF Report: Filtering by day: ${day}`);
-    } else if (month) {
-      // Month filter (e.g., "2024-12")
-      const [year, monthNum] = month.split('-');
-      const start = `${year}-${monthNum}-01`;
-      const endDate = new Date(parseInt(year), parseInt(monthNum), 0); // Last day of month
-      const end = endDate.toISOString().slice(0, 10);
-      query = query.gte('date', start).lte('date', end);
-      console.log(`PDF Report: Filtering by month: ${month} (${start} to ${end})`);
-    } else if (startDate && endDate) {
-      // Date range filter - IMPORTANT FIX HERE
-      const start = new Date(startDate);
-      const end = new Date(endDate);
-
-      if (isNaN(start.getTime()) || isNaN(end.getTime())) {
-        throw new BadRequestException('Invalid date format');
-      }
-
-      // Format dates to YYYY-MM-DD
-      const startFormatted = start.toISOString().split('T')[0];
-      const endFormatted = end.toISOString().split('T')[0];
-
-      query = query.gte('date', startFormatted).lte('date', endFormatted);
-      console.log(`PDF Report: Filtering by date range: ${startFormatted} to ${endFormatted}`);
-    } else if (startDate) {
-      // Single start date
-      const start = new Date(startDate);
-      if (isNaN(start.getTime())) {
-        throw new BadRequestException('Invalid start date format');
-      }
-      const startFormatted = start.toISOString().split('T')[0];
-      query = query.gte('date', startFormatted);
-      console.log(`PDF Report: Filtering from date: ${startFormatted}`);
-    } else if (endDate) {
-      // Single end date
-      const end = new Date(endDate);
-      if (isNaN(end.getTime())) {
-        throw new BadRequestException('Invalid end date format');
-      }
-      const endFormatted = end.toISOString().split('T')[0];
-      query = query.lte('date', endFormatted);
-      console.log(`PDF Report: Filtering to date: ${endFormatted}`);
+    if (isNaN(start.getTime()) || isNaN(end.getTime())) {
+      throw new BadRequestException('Invalid date format');
     }
 
-    // Apply employee filters
-    if (employeeId) {
-      query = query.eq('users.employee_id', employeeId);
-      console.log(`PDF Report: Filtering by employee ID: ${employeeId}`);
+    // Format dates to YYYY-MM-DD
+    const startFormatted = start.toISOString().split('T')[0];
+    const endFormatted = end.toISOString().split('T')[0];
+
+    query = query.gte('date', startFormatted).lte('date', endFormatted);
+    console.log(`PDF Report: Filtering by date range: ${startFormatted} to ${endFormatted}`);
+  } else if (startDate) {
+    // Single start date
+    const start = new Date(startDate);
+    if (isNaN(start.getTime())) {
+      throw new BadRequestException('Invalid start date format');
     }
-
-    if (name) {
-      query = query.ilike('users.name', `%${name}%`);
-      console.log(`PDF Report: Filtering by name: ${name}`);
+    const startFormatted = start.toISOString().split('T')[0];
+    query = query.gte('date', startFormatted);
+    console.log(`PDF Report: Filtering from date: ${startFormatted}`);
+  } else if (endDate) {
+    // Single end date
+    const end = new Date(endDate);
+    if (isNaN(end.getTime())) {
+      throw new BadRequestException('Invalid end date format');
     }
-
-    if (department) {
-      query = query.ilike('users.department', `%${department}%`);
-      console.log(`PDF Report: Filtering by department: ${department}`);
-    }
-
-    if (designation) {
-      query = query.ilike('users.designation', `%${designation}%`);
-      console.log(`PDF Report: Filtering by designation: ${designation}`);
-    }
-
-    // Apply status filter
-    if (status) {
-      const statusLower = status.toLowerCase();
-      switch (statusLower) {
-        case 'present':
-          query = query.eq('is_absent', false)
-            .not('check_in', 'is', null)
-            .not('check_out', 'is', null);
-          console.log(`PDF Report: Filtering by status: Present`);
-          break;
-        case 'absent':
-          query = query.eq('is_absent', true);
-          console.log(`PDF Report: Filtering by status: Absent`);
-          break;
-        case 'checked-in':
-          query = query.not('check_in', 'is', null)
-            .is('check_out', null)
-            .eq('is_absent', false);
-          console.log(`PDF Report: Filtering by status: Checked In`);
-          break;
-        case 'checked-out':
-          query = query.not('check_in', 'is', null)
-            .not('check_out', 'is', null)
-            .eq('is_absent', false);
-          console.log(`PDF Report: Filtering by status: Checked Out`);
-          break;
-        case 'half-day':
-          query = query.not('half_day_type', 'is', null)
-            .eq('is_absent', false);
-          console.log(`PDF Report: Filtering by status: Half Day`);
-          break;
-        case 'permission':
-          query = query.not('permission_time', 'is', null)
-            .eq('is_absent', false);
-          console.log(`PDF Report: Filtering by status: Permission`);
-          break;
-        case 'manual':
-          query = query.eq('manual_entry', true);
-          console.log(`PDF Report: Filtering by status: Manual Entry`);
-          break;
-        case 'auto':
-          query = query.eq('manual_entry', false);
-          console.log(`PDF Report: Filtering by status: Auto Entry`);
-          break;
-        default:
-          console.log(`PDF Report: Unknown status filter: ${status}`);
-      }
-    }
-
-    console.log(`PDF Report: Executing query with filters...`);
-
-    const { data, error } = await query;
-
-    if (error) {
-      console.error('Database error:', error);
-      throw new InternalServerErrorException(`Database error: ${error.message}`);
-    }
-
-    console.log(`PDF Report: Found ${data?.length || 0} records`);
-
-    if (!data || data.length === 0) {
-      throw new BadRequestException('No attendance data found for the selected filters');
-    }
-
-    // Process data for PDF with enhanced information
-    const processedData = data.map(record => {
-      const checkInTime = record.check_in ? this.parseTimeFromDateTime(record.check_in) : null;
-      const checkOutTime = record.check_out ? this.parseTimeFromDateTime(record.check_out) : null;
-
-      // Calculate late arrival (after 09:30 AM)
-      const isLateArrival = checkInTime ?
-        this.isLateArrival(checkInTime) : false;
-
-      // Calculate early departure (before 19:00 PM)
-      const isEarlyDeparture = checkOutTime ?
-        this.isEarlyDeparture(checkOutTime) : false;
-
-      // Get status with detailed code
-      const statusDetail = this.getDetailedStatus(record);
-
-      return {
-        date: record.date,
-        user_id: record.user_id,
-        employee_id: record.users?.employee_id ?? 'N/A',
-        name: record.users?.name ?? 'N/A',
-        department: record.users?.department ?? 'N/A',
-        designation: record.users?.designation ?? 'N/A',
-        email: record.users?.email ?? 'N/A',
-        check_in: this.toIST(record.check_in) || '-',
-        check_out: this.toIST(record.check_out) || '-',
-        check_in_raw: record.check_in,
-        check_out_raw: record.check_out,
-        check_in_time: checkInTime,
-        check_out_time: checkOutTime,
-        total_time: record.total_time_minutes != null
-          ? this.formatMinutesToHHMM(record.total_time_minutes)
-          : '00:00',
-        total_minutes: record.total_time_minutes || 0,
-        status: statusDetail.label,
-        status_code: statusDetail.code,
-        is_absent: record.is_absent ? 'Yes' : 'No',
-        is_late_arrival: isLateArrival ? 'Yes' : 'No',
-        is_early_departure: isEarlyDeparture ? 'Yes' : 'No',
-        absence_reason: record.absence_reason?.substring(0, 100) || '-',
-        half_day_type: record.half_day_type || '-',
-        permission_time: record.permission_time || '-',
-        permission_duration: record.permission_duration_minutes != null
-          ? `${Math.floor(record.permission_duration_minutes / 60)}h ${record.permission_duration_minutes % 60}m`
-          : '-',
-        permission_reason: record.permission_reason?.substring(0, 100) || '-',
-        manual_entry: record.manual_entry ? 'Yes' : 'No',
-        entry_type: record.manual_entry ? 'Manual' : 'Auto',
-        notes: record.notes?.substring(0, 100) || '-',
-        created_at: this.toIST(record.created_at),
-        updated_at: this.toIST(record.updated_at),
-        user_created_at: record.users?.created_at ?
-          new Date(record.users.created_at).toLocaleDateString('en-IN') : 'N/A',
-        users: record.users // Include full user object for statistics
-      };
-    });
-
-    // Apply advanced filters on processed data
-    let filteredData = processedData;
-
-    if (lateArrivalsOnly) {
-      filteredData = filteredData.filter(r => r.is_late_arrival === 'Yes');
-      console.log(`PDF Report: Filtered to ${filteredData.length} late arrivals`);
-    }
-
-    if (earlyDeparturesOnly) {
-      filteredData = filteredData.filter(r => r.is_early_departure === 'Yes');
-      console.log(`PDF Report: Filtered to ${filteredData.length} early departures`);
-    }
-
-    if (filteredData.length === 0) {
-      throw new BadRequestException('No records match the additional filters (late arrivals/early departures)');
-    }
-
-    // Calculate comprehensive summary statistics
-    const summary = this.calculateComprehensiveSummary(filteredData);
-
-    // Group data by department if requested
-    let departmentGroups: any[] | null = null;
-    if (groupByDepartment) {
-      departmentGroups = this.groupByDepartment(filteredData);
-    }
-
-    // Calculate user statistics (NEW FEATURE)
-    const userStatistics = this.calculateUserStatistics(filteredData);
-    console.log(`PDF Report: Calculated statistics for ${userStatistics.length} users`);
-
-    // Create metadata object for PDF
-    const metadata = {
-      reportType,
-      filters: {
-        dateRange: startDate && endDate ? `${startDate} to ${endDate}` :
-          day ? `Day: ${day}` :
-            month ? `Month: ${month}` : 'All Dates',
-        employeeId: employeeId || 'All',
-        department: department || 'All',
-        name: name || 'All',
-        designation: designation || 'All',
-        status: status || 'All',
-        lateArrivalsOnly,
-        earlyDeparturesOnly,
-      },
-      startDate: startDate || day || (month ? `${month}-01` : null),
-      endDate: endDate || day || (month ? new Date(
-        new Date(`${month}-01`).getFullYear(),
-        new Date(`${month}-01`).getMonth() + 1,
-        0
-      ).toISOString().slice(0, 10) : null),
-      employeeId: employeeId || null,
-      department: department || null,
-      generatedAt: new Date().toLocaleString('en-IN', {
-        timeZone: 'Asia/Kolkata',
-        dateStyle: 'full',
-        timeStyle: 'medium'
-      }),
-      includeSummary,
-      includeCharts,
-      groupByDepartment,
-      totalFilteredRecords: filteredData.length,
-      totalUsers: userStatistics.length, // Add user count to metadata
-    };
-
-    console.log(`PDF Report: Generating ${reportType} PDF with ${filteredData.length} records for ${userStatistics.length} users`);
-
-    // Generate PDF based on report type
-    let pdfBuffer: Buffer;
-
-    if (reportType === 'summary') {
-      pdfBuffer = await this.createSummaryPDF(filteredData, summary, metadata, departmentGroups, includeCharts);
-    } else {
-      // For detailed reports, include user statistics
-      pdfBuffer = await this.createDetailedPDF(
-        filteredData,
-        summary,
-        metadata,
-        departmentGroups,
-        includeCharts,
-        userStatistics // Pass user statistics to detailed PDF
-      );
-    }
-
-    // Return the PDF buffer along with metadata
-    // In generatePDFReport method, update the return statement:
-    return {
-      pdfBuffer,
-      meta: {
-        filtersApplied: dto,
-        dateRange: metadata.filters.dateRange,
-        totalRecords: filteredData.length,
-        totalUsers: userStatistics.length,
-        perUserSummary: userStatistics.map(user => ({
-          name: user.name,
-          employee_id: user.employee_id,
-          present_days: user.present_days,
-          absent_days: user.absent_days,
-          half_days: {
-            total: user.total_half_days,
-            fn: user.half_day_fn,
-            an: user.half_day_an
-          },
-          permission_days: user.permission_days,
-          attendance_rate: user.attendance_rate,
-          average_work_hours: user.average_work_hours
-        })),
-        overallSummary: {
-          total_present_days: userStatistics.reduce((sum, user) => sum + (user.present_days || 0), 0),
-          total_absent_days: userStatistics.reduce((sum, user) => sum + (user.absent_days || 0), 0),
-          total_half_days: userStatistics.reduce((sum, user) => sum + (user.total_half_days || 0), 0),
-          total_permission_days: userStatistics.reduce((sum, user) => sum + (user.permission_days || 0), 0),
-          average_attendance_rate: userStatistics.length > 0
-            ? (userStatistics.reduce((sum, user) => sum + parseFloat(user.attendance_rate || 0), 0) / userStatistics.length).toFixed(2)
-            : '0.00'
-        },
-        generatedAt: metadata.generatedAt,
-      },
-    };
+    const endFormatted = end.toISOString().split('T')[0];
+    query = query.lte('date', endFormatted);
+    console.log(`PDF Report: Filtering to date: ${endFormatted}`);
   }
 
+  // Apply employee filters
+  if (employeeId) {
+    query = query.eq('users.employee_id', employeeId);
+    console.log(`PDF Report: Filtering by employee ID: ${employeeId}`);
+  }
 
-  private createPerUserSummaryTable(doc: any, userStats: any[], startY: number, metadata: any) {
-    console.log('Creating per-user summary table...');
+  if (name) {
+    query = query.ilike('users.name', `%${name}%`);
+    console.log(`PDF Report: Filtering by name: ${name}`);
+  }
 
-    const headers = [
-      'Employee Name',
-      'Emp ID',
-      'Present',
-      'Absent',
-      'Half Days',
-      'Permission',
-      'Attendance %'
-    ];
+  if (department) {
+    query = query.ilike('users.department', `%${department}%`);
+    console.log(`PDF Report: Filtering by department: ${department}`);
+  }
 
-    const colWidths = [80, 60, 50, 50, 60, 50, 60];
-    const headerX = 30;
-    const headerY = startY;
+  if (designation) {
+    query = query.ilike('users.designation', `%${designation}%`);
+    console.log(`PDF Report: Filtering by designation: ${designation}`);
+  }
 
-    // Table header with background
-    doc.rect(headerX, headerY, colWidths.reduce((a, b) => a + b), 25)
-      .fill('#2196F3')
-      .stroke('#0D47A1');
+  // Apply status filter
+  if (status) {
+    const statusLower = status.toLowerCase();
+    switch (statusLower) {
+      case 'present':
+        query = query.eq('is_absent', false)
+          .not('check_in', 'is', null)
+          .not('check_out', 'is', null);
+        console.log(`PDF Report: Filtering by status: Present`);
+        break;
+      case 'absent':
+        query = query.eq('is_absent', true);
+        console.log(`PDF Report: Filtering by status: Absent`);
+        break;
+      case 'checked-in':
+        query = query.not('check_in', 'is', null)
+          .is('check_out', null)
+          .eq('is_absent', false);
+        console.log(`PDF Report: Filtering by status: Checked In`);
+        break;
+      case 'checked-out':
+        query = query.not('check_in', 'is', null)
+          .not('check_out', 'is', null)
+          .eq('is_absent', false);
+        console.log(`PDF Report: Filtering by status: Checked Out`);
+        break;
+      case 'half-day':
+        query = query.not('half_day_type', 'is', null)
+          .eq('is_absent', false);
+        console.log(`PDF Report: Filtering by status: Half Day`);
+        break;
+      case 'permission':
+        query = query.not('permission_time', 'is', null)
+          .eq('is_absent', false);
+        console.log(`PDF Report: Filtering by status: Permission`);
+        break;
+      case 'holiday':
+        // For PDF reports, we want to include records with no attendance (Not Marked) as Holiday
+        // This requires a different approach since holidays aren't in the database
+        // We'll handle this in post-processing
+        console.log(`PDF Report: Filtering by status: Holiday (will be applied in post-processing)`);
+        break;
+      case 'manual':
+        query = query.eq('manual_entry', true);
+        console.log(`PDF Report: Filtering by status: Manual Entry`);
+        break;
+      case 'auto':
+        query = query.eq('manual_entry', false);
+        console.log(`PDF Report: Filtering by status: Auto Entry`);
+        break;
+      default:
+        console.log(`PDF Report: Unknown status filter: ${status}`);
+    }
+  }
 
-    doc.fillColor('#fff')
-      .fontSize(10)
-      .font('Helvetica-Bold');
+  console.log(`PDF Report: Executing query with filters...`);
 
-    headers.forEach((header, i) => {
-      doc.text(header,
-        headerX + colWidths.slice(0, i).reduce((a, b) => a + b, 0) + 5,
-        headerY + 8,
-        { width: colWidths[i] - 10 }
-      );
-    });
+  const { data, error } = await query;
 
-    // Table data
-    let tableY = headerY + 30;
-    doc.fillColor('#263238')
-      .fontSize(9);
+  if (error) {
+    console.error('Database error:', error);
+    throw new InternalServerErrorException(`Database error: ${error.message}`);
+  }
 
-    userStats.forEach((user, rowIndex) => {
-      if (tableY > doc.page.height - 50) {
-        doc.addPage();
-        tableY = 50;
-        // Redraw header on new page
-        doc.rect(headerX, tableY - 20, colWidths.reduce((a, b) => a + b), 25)
-          .fill('#2196F3')
-          .stroke('#0D47A1');
+  console.log(`PDF Report: Found ${data?.length || 0} records`);
 
-        doc.fillColor('#fff')
-          .fontSize(10)
-          .font('Helvetica-Bold');
+  if (!data || data.length === 0) {
+    throw new BadRequestException('No attendance data found for the selected filters');
+  }
 
-        headers.forEach((header, i) => {
-          doc.text(header,
-            headerX + colWidths.slice(0, i).reduce((a, b) => a + b, 0) + 5,
-            tableY - 12,
-            { width: colWidths[i] - 10 }
-          );
-        });
+  // Process data for PDF with enhanced information and HOLIDAY mapping
+  const processedData = data.map(record => {
+    const checkInTime = record.check_in ? this.parseTimeFromDateTime(record.check_in) : null;
+    const checkOutTime = record.check_out ? this.parseTimeFromDateTime(record.check_out) : null;
 
-        tableY += 10;
-      }
+    // Calculate late arrival (after 09:30 AM)
+    const isLateArrival = checkInTime ?
+      this.isLateArrival(checkInTime) : false;
 
-      // Alternate row colors
-      const rowBgColor = rowIndex % 2 === 0 ? '#E3F2FD' : '#FFFFFF';
-      doc.rect(headerX, tableY - 5, colWidths.reduce((a, b) => a + b), 20)
-        .fill(rowBgColor);
+    // Calculate early departure (before 19:00 PM)
+    const isEarlyDeparture = checkOutTime ?
+      this.isEarlyDeparture(checkOutTime) : false;
 
-      // Highlight attendance percentages
-      const attendanceRate = parseFloat(user.attendance_rate);
-      if (attendanceRate >= 90) {
-        doc.rect(headerX, tableY - 5, colWidths.reduce((a, b) => a + b), 20)
-          .stroke('#4CAF50')
-          .lineWidth(1);
-      } else if (attendanceRate < 70) {
-        doc.rect(headerX, tableY - 5, colWidths.reduce((a, b) => a + b), 20)
-          .stroke('#F44336')
-          .lineWidth(1);
-      }
+    // Get status with detailed code
+    const statusDetail = this.getDetailedStatus(record);
 
-      // Format half days as "FN/AN"
-      const halfDaysFormatted = user.half_day_fn > 0 || user.half_day_an > 0
-        ? `${user.half_day_fn}FN/${user.half_day_an}AN`
-        : '0';
+    return {
+      date: record.date,
+      user_id: record.user_id,
+      employee_id: record.users?.employee_id ?? 'N/A',
+      name: record.users?.name ?? 'N/A',
+      department: record.users?.department ?? 'N/A',
+      designation: record.users?.designation ?? 'N/A',
+      email: record.users?.email ?? 'N/A',
+      check_in: this.toIST(record.check_in) || '-',
+      check_out: this.toIST(record.check_out) || '-',
+      check_in_raw: record.check_in,
+      check_out_raw: record.check_out,
+      check_in_time: checkInTime,
+      check_out_time: checkOutTime,
+      total_time: record.total_time_minutes != null
+        ? this.formatMinutesToHHMM(record.total_time_minutes)
+        : '00:00',
+      total_minutes: record.total_time_minutes || 0,
+      // For PDF: Convert "Not Marked" to "Holiday" if holiday filter is applied or if it's a weekend
+      status: statusDetail.code === 'not-marked' ? 'Holiday' : statusDetail.label,
+      status_code: statusDetail.code === 'not-marked' ? 'holiday' : statusDetail.code,
+      is_absent: record.is_absent ? 'Yes' : 'No',
+      is_late_arrival: isLateArrival ? 'Yes' : 'No',
+      is_early_departure: isEarlyDeparture ? 'Yes' : 'No',
+      absence_reason: record.absence_reason?.substring(0, 100) || '-',
+      half_day_type: record.half_day_type || '-',
+      permission_time: record.permission_time || '-',
+      permission_duration: record.permission_duration_minutes != null
+        ? `${Math.floor(record.permission_duration_minutes / 60)}h ${record.permission_duration_minutes % 60}m`
+        : '-',
+      permission_reason: record.permission_reason?.substring(0, 100) || '-',
+      manual_entry: record.manual_entry ? 'Yes' : 'No',
+      entry_type: record.manual_entry ? 'Manual' : 'Auto',
+      notes: record.notes?.substring(0, 100) || '-',
+      created_at: this.toIST(record.created_at),
+      updated_at: this.toIST(record.updated_at),
+      user_created_at: record.users?.created_at ?
+        new Date(record.users.created_at).toLocaleDateString('en-IN') : 'N/A',
+      users: record.users // Include full user object for statistics
+    };
+  });
 
-      const rowData = [
-        user.name.length > 20 ? user.name.substring(0, 18) + '...' : user.name,
-        user.employee_id || 'N/A',
-        user.present_days.toString(),
-        user.absent_days.toString(),
-        halfDaysFormatted,
-        user.permission_days.toString(),
-        `${attendanceRate}%`
-      ];
+  // Apply advanced filters on processed data
+  let filteredData = processedData;
 
-      rowData.forEach((cell, i) => {
-        const cellX = headerX + colWidths.slice(0, i).reduce((a, b) => a + b, 0) + 5;
-        const cellWidth = colWidths[i] - 10;
+  if (lateArrivalsOnly) {
+    filteredData = filteredData.filter(r => r.is_late_arrival === 'Yes');
+    console.log(`PDF Report: Filtered to ${filteredData.length} late arrivals`);
+  }
 
-        // Color code based on performance
-        if (i === 6) { // Attendance rate column
-          let cellColor = '#4CAF50'; // Green for good
-          if (attendanceRate < 70) {
-            cellColor = '#F44336'; // Red for poor
-          } else if (attendanceRate < 90) {
-            cellColor = '#FF9800'; // Orange for average
-          }
+  if (earlyDeparturesOnly) {
+    filteredData = filteredData.filter(r => r.is_early_departure === 'Yes');
+    console.log(`PDF Report: Filtered to ${filteredData.length} early departures`);
+  }
 
-          doc.fillColor(cellColor)
-            .font('Helvetica-Bold');
-        } else if (i === 2) { // Present days
-          doc.fillColor('#2E7D32') // Dark green
-            .font('Helvetica-Bold');
-        } else if (i === 3) { // Absent days
-          doc.fillColor('#C62828') // Dark red
-            .font('Helvetica-Bold');
-        } else {
-          doc.fillColor('#263238');
-        }
+  // Apply holiday status filter if requested
+  if (status && status.toLowerCase() === 'holiday') {
+    filteredData = filteredData.filter(r => r.status_code === 'holiday');
+    console.log(`PDF Report: Filtered to ${filteredData.length} holiday records`);
+  }
 
-        doc.text(cell.toString(), cellX, tableY, { width: cellWidth });
+  if (filteredData.length === 0) {
+    throw new BadRequestException('No records match the additional filters (late arrivals/early departures/holiday)');
+  }
+
+  // Calculate comprehensive summary statistics (includes holiday count from updated method)
+  const summary = this.calculateComprehensiveSummary(filteredData);
+
+  // Group data by department if requested
+  let departmentGroups: any[] | null = null;
+  if (groupByDepartment) {
+    departmentGroups = this.groupByDepartment(filteredData);
+  }
+
+  // Calculate user statistics (with holiday count)
+  const userStatistics = this.calculateUserStatistics(filteredData);
+  console.log(`PDF Report: Calculated statistics for ${userStatistics.length} users`);
+
+  // Create metadata object for PDF
+  const metadata = {
+    reportType,
+    filters: {
+      dateRange: startDate && endDate ? `${startDate} to ${endDate}` :
+        day ? `Day: ${day}` :
+          month ? `Month: ${month}` : 'All Dates',
+      employeeId: employeeId || 'All',
+      department: department || 'All',
+      name: name || 'All',
+      designation: designation || 'All',
+      status: status || 'All',
+      lateArrivalsOnly,
+      earlyDeparturesOnly,
+    },
+    startDate: startDate || day || (month ? `${month}-01` : null),
+    endDate: endDate || day || (month ? new Date(
+      new Date(`${month}-01`).getFullYear(),
+      new Date(`${month}-01`).getMonth() + 1,
+      0
+    ).toISOString().slice(0, 10) : null),
+    employeeId: employeeId || null,
+    department: department || null,
+    generatedAt: new Date().toLocaleString('en-IN', {
+      timeZone: 'Asia/Kolkata',
+      dateStyle: 'full',
+      timeStyle: 'medium'
+    }),
+    includeSummary,
+    includeCharts,
+    groupByDepartment,
+    totalFilteredRecords: filteredData.length,
+    totalUsers: userStatistics.length,
+    holidayCount: summary.byStatus.holiday || 0, // Get holiday count from summary
+  };
+
+  console.log(`PDF Report: Generating ${reportType} PDF with ${filteredData.length} records for ${userStatistics.length} users (Holidays: ${metadata.holidayCount})`);
+
+  // Generate PDF based on report type
+  let pdfBuffer: Buffer;
+
+  if (reportType === 'summary') {
+    pdfBuffer = await this.createSummaryPDF(filteredData, summary, metadata, departmentGroups, includeCharts);
+  } else {
+    // For detailed reports, include user statistics
+    pdfBuffer = await this.createDetailedPDF(
+      filteredData,
+      summary,
+      metadata,
+      departmentGroups,
+      includeCharts,
+      userStatistics // Pass user statistics to detailed PDF
+    );
+  }
+
+  // Return the PDF buffer along with metadata
+  return {
+    pdfBuffer,
+    meta: {
+      filtersApplied: dto,
+      dateRange: metadata.filters.dateRange,
+      totalRecords: filteredData.length,
+      totalUsers: userStatistics.length,
+      holidayCount: metadata.holidayCount, // Add holiday count to meta
+      perUserSummary: userStatistics.map(user => ({
+        name: user.name,
+        employee_id: user.employee_id,
+        present_days: user.present_days,
+        absent_days: user.absent_days,
+        holiday_days: user.holiday_days || 0, // Add holiday days per user
+        half_days: {
+          total: user.total_half_days,
+          fn: user.half_day_fn,
+          an: user.half_day_an
+        },
+        permission_days: user.permission_days,
+        attendance_rate: user.attendance_rate,
+        average_work_hours: user.average_work_hours
+      })),
+      overallSummary: {
+        total_present_days: userStatistics.reduce((sum, user) => sum + (user.present_days || 0), 0),
+        total_absent_days: userStatistics.reduce((sum, user) => sum + (user.absent_days || 0), 0),
+        total_holiday_days: userStatistics.reduce((sum, user) => sum + (user.holiday_days || 0), 0), // Add holiday total
+        total_half_days: userStatistics.reduce((sum, user) => sum + (user.total_half_days || 0), 0),
+        total_permission_days: userStatistics.reduce((sum, user) => sum + (user.permission_days || 0), 0),
+        average_attendance_rate: userStatistics.length > 0
+          ? (userStatistics.reduce((sum, user) => sum + parseFloat(user.attendance_rate || 0), 0) / userStatistics.length).toFixed(2)
+          : '0.00'
+      },
+      generatedAt: metadata.generatedAt,
+    },
+  };
+}
+
+ private createPerUserSummaryTable(doc: any, userStats: any[], startY: number, metadata: any) {
+  console.log('Creating per-user summary table...');
+
+  // Add Holiday to headers
+  const headers = [
+    'Employee Name',
+    'Emp ID',
+    'Present',
+    'Absent',
+    'Holiday', // Add Holiday column
+    'Half Days',
+    'Permission',
+    'Attendance %'
+  ];
+
+  // Adjust column widths to accommodate Holiday column
+  const colWidths = [70, 45, 35, 35, 35, 45, 40, 45];
+  const headerX = 30;
+  const headerY = startY;
+
+  // Table header with background
+  doc.rect(headerX, headerY, colWidths.reduce((a, b) => a + b), 25)
+    .fill('#2196F3')
+    .stroke('#0D47A1');
+
+  doc.fillColor('#fff')
+    .fontSize(9)
+    .font('Helvetica-Bold');
+
+  headers.forEach((header, i) => {
+    doc.text(header,
+      headerX + colWidths.slice(0, i).reduce((a, b) => a + b, 0) + 3,
+      headerY + 8,
+      { width: colWidths[i] - 6 }
+    );
+  });
+
+  // Table data
+  let tableY = headerY + 30;
+  doc.fillColor('#263238')
+    .fontSize(8);
+
+  userStats.forEach((user, rowIndex) => {
+    if (tableY > doc.page.height - 50) {
+      doc.addPage();
+      tableY = 50;
+      // Redraw header on new page
+      doc.rect(headerX, tableY - 20, colWidths.reduce((a, b) => a + b), 25)
+        .fill('#2196F3')
+        .stroke('#0D47A1');
+
+      doc.fillColor('#fff')
+        .fontSize(9)
+        .font('Helvetica-Bold');
+
+      headers.forEach((header, i) => {
+        doc.text(header,
+          headerX + colWidths.slice(0, i).reduce((a, b) => a + b, 0) + 3,
+          tableY - 12,
+          { width: colWidths[i] - 6 }
+        );
       });
 
-      tableY += 20;
-    });
+      tableY += 10;
+    }
 
-    // Add summary statistics at the bottom
-    const summaryY = tableY + 20;
-    doc.fillColor('#37474F')
-      .fontSize(11)
-      .font('Helvetica-Bold')
-      .text('📊 Overall Summary:', headerX, summaryY);
+    // Alternate row colors
+    const rowBgColor = rowIndex % 2 === 0 ? '#E3F2FD' : '#FFFFFF';
+    doc.rect(headerX, tableY - 5, colWidths.reduce((a, b) => a + b), 18)
+      .fill(rowBgColor);
 
-    const totalUsers = userStats.length;
-    const totalPresent = userStats.reduce((sum, user) => sum + (user.present_days || 0), 0);
-    const totalAbsent = userStats.reduce((sum, user) => sum + (user.absent_days || 0), 0);
-    const totalHalfDays = userStats.reduce((sum, user) => sum + (user.total_half_days || 0), 0);
-    const totalPermission = userStats.reduce((sum, user) => sum + (user.permission_days || 0), 0);
+    // Highlight attendance percentages
+    const attendanceRate = parseFloat(user.attendance_rate || '0');
+    if (attendanceRate >= 90) {
+      doc.rect(headerX, tableY - 5, colWidths.reduce((a, b) => a + b), 18)
+        .stroke('#4CAF50')
+        .lineWidth(1);
+    } else if (attendanceRate < 70 && attendanceRate > 0) {
+      doc.rect(headerX, tableY - 5, colWidths.reduce((a, b) => a + b), 18)
+        .stroke('#F44336')
+        .lineWidth(1);
+    }
 
-    const summaryStats = [
-      `• Total Employees: ${totalUsers}`,
-      `• Total Present Days: ${totalPresent}`,
-      `• Total Absent Days: ${totalAbsent}`,
-      `• Total Half Days: ${totalHalfDays} (FN: ${userStats.reduce((sum, user) => sum + (user.half_day_fn || 0), 0)}, AN: ${userStats.reduce((sum, user) => sum + (user.half_day_an || 0), 0)})`,
-      `• Total Permission Days: ${totalPermission}`,
-      `• Date Range: ${metadata.filters.dateRange}`
+    // Format half days as "FN/AN"
+    const halfDaysFormatted = user.half_day_fn > 0 || user.half_day_an > 0
+      ? `${user.half_day_fn}FN/${user.half_day_an}AN`
+      : '0';
+
+    const rowData = [
+      user.name.length > 15 ? user.name.substring(0, 14) + '...' : user.name,
+      user.employee_id || 'N/A',
+      user.present_days?.toString() || '0',
+      user.absent_days?.toString() || '0',
+      (user.holiday_days || 0).toString(), // Add holiday count
+      halfDaysFormatted,
+      user.permission_days?.toString() || '0',
+      attendanceRate > 0 ? `${attendanceRate}%` : '0%'
     ];
 
-    doc.fillColor('#546E7A')
-      .fontSize(10)
-      .font('Helvetica');
+    rowData.forEach((cell, i) => {
+      const cellX = headerX + colWidths.slice(0, i).reduce((a, b) => a + b, 0) + 5;
+      const cellWidth = colWidths[i] - 10;
 
-    summaryStats.forEach((stat, i) => {
-      doc.text(stat, headerX + 10, summaryY + 20 + (i * 15));
-    });
-  }
-
-  // Replace the calculateUserStatistics method with this improved version:
-  private calculateUserStatistics(data: any[]): any[] {
-    console.log('Calculating detailed user statistics...');
-
-    // Group data by user
-    const userMap: { [key: string]: any } = {};
-
-    data.forEach(record => {
-      const userId = record.user_id;
-      const userName = record.name || 'Unknown';
-      const employeeId = record.employee_id || 'N/A';
-      const department = record.department || 'N/A';
-      const designation = record.designation || 'N/A';
-
-      if (!userMap[userId]) {
-        userMap[userId] = {
-          user_id: userId,
-          name: userName,
-          employee_id: employeeId,
-          department: department,
-          designation: designation,
-          total_days: 0,
-          present_days: 0,
-          absent_days: 0,
-          half_day_morning: 0, // FN (Forenoon)
-          half_day_afternoon: 0, // AN (Afternoon)
-          permission_days: 0,
-          total_work_minutes: 0,
-          records: []
-        };
-      }
-
-      const userStats = userMap[userId];
-      userStats.total_days++;
-      userStats.records.push(record);
-
-      // Categorize by status
-      if (record.is_absent === 'Yes') {
-        userStats.absent_days++;
-      } else if (record.half_day_type && record.half_day_type !== '-') {
-        if (record.half_day_type.toLowerCase().includes('morning') ||
-          record.half_day_type.toLowerCase().includes('fn')) {
-          userStats.half_day_morning++; // FN
-        } else if (record.half_day_type.toLowerCase().includes('afternoon') ||
-          record.half_day_type.toLowerCase().includes('an')) {
-          userStats.half_day_afternoon++; // AN
+      // Color code based on performance
+      if (i === 7) { // Attendance rate column
+        let cellColor = '#4CAF50'; // Green for good
+        if (attendanceRate < 70 && attendanceRate > 0) {
+          cellColor = '#F44336'; // Red for poor
+        } else if (attendanceRate < 90 && attendanceRate >= 70) {
+          cellColor = '#FF9800'; // Orange for average
         }
-      } else if (record.permission_time && record.permission_time !== '-') {
-        userStats.permission_days++;
-      } else if (record.check_in && record.check_in !== '-' &&
-        record.check_out && record.check_out !== '-') {
-        userStats.present_days++;
-        userStats.total_work_minutes += record.total_minutes || 0;
+
+        doc.fillColor(cellColor)
+          .font('Helvetica-Bold');
+      } else if (i === 2) { // Present days
+        doc.fillColor('#2E7D32') // Dark green
+          .font('Helvetica-Bold');
+      } else if (i === 3) { // Absent days
+        doc.fillColor('#C62828') // Dark red
+          .font('Helvetica-Bold');
+      } else if (i === 4) { // Holiday days
+        doc.fillColor('#9C27B0') // Purple for holidays
+          .font('Helvetica-Bold');
+      } else {
+        doc.fillColor('#263238');
       }
+
+      doc.text(cell.toString(), cellX, tableY, { width: cellWidth });
     });
 
-    // Convert map to array and format
-    const userStatsArray = Object.values(userMap).map((user: any) => {
-      const presentDays = user.present_days || 0;
-      const totalDays = user.total_days || 0;
-      const totalWorkMinutes = user.total_work_minutes || 0;
-      const totalHalfDays = (user.half_day_morning || 0) + (user.half_day_afternoon || 0);
+    tableY += 18;
+  });
 
-      return {
-        ...user,
-        total_half_days: totalHalfDays,
-        half_day_fn: user.half_day_morning || 0,
-        half_day_an: user.half_day_afternoon || 0,
-        total_work_hours: (totalWorkMinutes / 60).toFixed(2),
-        average_work_hours: presentDays > 0
-          ? (totalWorkMinutes / presentDays / 60).toFixed(2)
-          : '0.00',
-        attendance_rate: totalDays > 0
-          ? ((presentDays / totalDays) * 100).toFixed(2)
-          : '0.00',
-        attendance_percentage: totalDays > 0
-          ? ((presentDays / totalDays) * 100).toFixed(2)
-          : '0.00'
+  // Add summary statistics at the bottom
+  const summaryY = tableY + 20;
+  doc.fillColor('#37474F')
+    .fontSize(11)
+    .font('Helvetica-Bold')
+    .text('📊 Overall Summary:', headerX, summaryY);
+
+  const totalUsers = userStats.length;
+  const totalPresent = userStats.reduce((sum, user) => sum + (user.present_days || 0), 0);
+  const totalAbsent = userStats.reduce((sum, user) => sum + (user.absent_days || 0), 0);
+  const totalHoliday = userStats.reduce((sum, user) => sum + (user.holiday_days || 0), 0);
+  const totalHalfDays = userStats.reduce((sum, user) => sum + (user.total_half_days || 0), 0);
+  const totalPermission = userStats.reduce((sum, user) => sum + (user.permission_days || 0), 0);
+
+  const summaryStats = [
+    `• Total Employees: ${totalUsers}`,
+    `• Total Present Days: ${totalPresent}`,
+    `• Total Absent Days: ${totalAbsent}`,
+    `• Total Holiday Days: ${totalHoliday}`,
+    `• Total Half Days: ${totalHalfDays} (FN: ${userStats.reduce((sum, user) => sum + (user.half_day_fn || 0), 0)}, AN: ${userStats.reduce((sum, user) => sum + (user.half_day_an || 0), 0)})`,
+    `• Total Permission Days: ${totalPermission}`,
+    `• Date Range: ${metadata.filters.dateRange}`
+  ];
+
+  doc.fillColor('#546E7A')
+    .fontSize(9)
+    .font('Helvetica');
+
+  summaryStats.forEach((stat, i) => {
+    doc.text(stat, headerX + 10, summaryY + 20 + (i * 12));
+  });
+}
+
+ // Replace the calculateUserStatistics method with this improved version:
+private calculateUserStatistics(data: any[]): any[] {
+  console.log('Calculating detailed user statistics...');
+
+  // Group data by user
+  const userMap: { [key: string]: any } = {};
+
+  data.forEach(record => {
+    const userId = record.user_id;
+    const userName = record.name || 'Unknown';
+    const employeeId = record.employee_id || 'N/A';
+    const department = record.department || 'N/A';
+    const designation = record.designation || 'N/A';
+
+    if (!userMap[userId]) {
+      userMap[userId] = {
+        user_id: userId,
+        name: userName,
+        employee_id: employeeId,
+        department: department,
+        designation: designation,
+        total_days: 0,
+        present_days: 0,
+        absent_days: 0,
+        holiday_days: 0, // Add holiday count
+        half_day_morning: 0, // FN (Forenoon)
+        half_day_afternoon: 0, // AN (Afternoon)
+        permission_days: 0,
+        total_work_minutes: 0,
+        late_arrivals: 0,
+        early_departures: 0,
+        records: []
       };
-    });
+    }
 
-    // Sort by name for better readability
-    return userStatsArray.sort((a: any, b: any) => {
-      return (a.name || '').localeCompare(b.name || '');
-    });
-  }
+    const userStats = userMap[userId];
+    userStats.total_days++;
+    userStats.records.push(record);
+
+    // Check for holiday (multiple ways it could be represented)
+    const isHoliday = 
+      record.status_code === 'holiday' ||
+      record.status === 'Holiday' ||
+      record.is_holiday === true ||
+      record.holiday === true ||
+      (record.status_code === 'not-marked' && record.is_holiday === true);
+
+    // Categorize by status - IMPORTANT: Check holiday FIRST
+    if (isHoliday) {
+      userStats.holiday_days++;
+      console.log(`Holiday counted for user ${userId} on date ${record.date}`);
+    } else if (record.is_absent === 'Yes' || record.is_absent === true) {
+      userStats.absent_days++;
+    } else if (record.half_day_type && record.half_day_type !== '-' && record.half_day_type !== null) {
+      userStats.half_day_morning++; // Count as half day (simplified)
+      // Alternative: differentiate between morning/afternoon if needed
+      if (record.half_day_type.toLowerCase().includes('morning') ||
+        record.half_day_type.toLowerCase().includes('fn')) {
+        userStats.half_day_morning++;
+      } else if (record.half_day_type.toLowerCase().includes('afternoon') ||
+        record.half_day_type.toLowerCase().includes('an')) {
+        userStats.half_day_afternoon++;
+      }
+    } else if (record.permission_time && record.permission_time !== '-' && record.permission_time !== null) {
+      userStats.permission_days++;
+    } else if (record.check_in && record.check_in !== '-' && 
+               record.check_out && record.check_out !== '-') {
+      userStats.present_days++;
+      if (record.total_minutes) {
+        userStats.total_work_minutes += record.total_minutes;
+      }
+    }
+
+    // Count late arrivals
+    if (record.is_late_arrival === 'Yes') {
+      userStats.late_arrivals++;
+    }
+
+    // Count early departures
+    if (record.is_early_departure === 'Yes') {
+      userStats.early_departures++;
+    }
+  });
+
+  // Convert map to array and format
+  const userStatsArray = Object.values(userMap).map((user: any) => {
+    const presentDays = user.present_days || 0;
+    const holidayDays = user.holiday_days || 0;
+    const halfDayMorning = user.half_day_morning || 0;
+    const halfDayAfternoon = user.half_day_afternoon || 0;
+    const totalDays = user.total_days || 0;
+    const totalWorkMinutes = user.total_work_minutes || 0;
+    const totalHalfDays = halfDayMorning + halfDayAfternoon;
+
+    // Calculate attendance rate including holidays as 100%
+    let attendanceRate = '0.00';
+    if (totalDays > 0) {
+      // Present + Holiday count as full days, half days count as 0.5
+      const weightedPresent = presentDays + holidayDays + (halfDayMorning * 0.5) + (halfDayAfternoon * 0.5) + (user.permission_days * 0.75);
+      attendanceRate = ((weightedPresent / totalDays) * 100).toFixed(1);
+    }
+
+    return {
+      ...user,
+      total_half_days: totalHalfDays,
+      half_day_fn: halfDayMorning,
+      half_day_an: halfDayAfternoon,
+      holiday_days: holidayDays,
+      total_work_hours: (totalWorkMinutes / 60).toFixed(2),
+      average_work_hours: presentDays > 0
+        ? (totalWorkMinutes / presentDays / 60).toFixed(2)
+        : '0.00',
+      attendance_rate: attendanceRate,
+      attendance_percentage: attendanceRate
+    };
+  });
+
+  // Sort by name for better readability
+  return userStatsArray.sort((a: any, b: any) => {
+    return (a.name || '').localeCompare(b.name || '');
+  });
+}
 
   // Helper method to get top reason from map
   private getTopReason(reasonMap: Map<string, number>): string {
@@ -3740,77 +3933,84 @@ export class AttendanceService {
     }
   }
 
-  private calculateComprehensiveSummary(data: any[]) {
-    const totalRecords = data.length;
+ private calculateComprehensiveSummary(data: any[]) {
+  const totalRecords = data.length;
 
-    // Count by status
-    const present = data.filter(r => r.status_code === 'present').length;
-    const absent = data.filter(r => r.status_code === 'absent').length;
-    const checkedIn = data.filter(r => r.status_code === 'checked-in').length;
-    const halfDay = data.filter(r => r.status_code.includes('half-day')).length;
-    const permission = data.filter(r => r.status_code === 'permission').length;
+  // Count by status
+  const present = data.filter(r => r.status_code === 'present').length;
+  const absent = data.filter(r => r.status_code === 'absent').length;
+  const checkedIn = data.filter(r => r.status_code === 'checked-in').length;
+  const halfDay = data.filter(r => r.status_code.includes('half-day')).length;
+  const permission = data.filter(r => r.status_code === 'permission').length;
+  const holiday = data.filter(r => r.status_code === 'holiday').length; // Add holiday count
 
-    // Count by entry type
-    const manualEntries = data.filter(r => r.entry_type === 'Manual').length;
-    const autoEntries = data.filter(r => r.entry_type === 'Auto').length;
+  // Count by entry type
+  const manualEntries = data.filter(r => r.entry_type === 'Manual').length;
+  const autoEntries = data.filter(r => r.entry_type === 'Auto').length;
 
-    // Calculate timing statistics
-    const lateArrivals = data.filter(r => r.is_late_arrival === 'Yes').length;
-    const earlyDepartures = data.filter(r => r.is_early_departure === 'Yes').length;
+  // Calculate timing statistics
+  const lateArrivals = data.filter(r => r.is_late_arrival === 'Yes').length;
+  const earlyDepartures = data.filter(r => r.is_early_departure === 'Yes').length;
 
-    // Calculate average work hours
-    const presentRecords = data.filter(r =>
-      r.status_code === 'present' || r.status_code === 'checked-out'
-    );
-    const totalWorkMinutes = presentRecords.reduce((sum, r) => sum + (r.total_minutes || 0), 0);
-    const averageWorkHours = presentRecords.length > 0
-      ? Number((totalWorkMinutes / presentRecords.length / 60).toFixed(2))
-      : 0;
+  // Calculate average work hours
+  const presentRecords = data.filter(r =>
+    r.status_code === 'present' || r.status_code === 'checked-out'
+  );
+  const totalWorkMinutes = presentRecords.reduce((sum, r) => sum + (r.total_minutes || 0), 0);
+  const averageWorkHours = presentRecords.length > 0
+    ? Number((totalWorkMinutes / presentRecords.length / 60).toFixed(2))
+    : 0;
 
-    // Calculate percentages
-    const attendanceRate = totalRecords > 0
-      ? Number(((present + checkedIn + halfDay + permission) / totalRecords * 100).toFixed(2))
-      : 0;
+  // Calculate percentages
+  const attendanceRate = totalRecords > 0
+    ? Number(((present + checkedIn + halfDay + permission) / totalRecords * 100).toFixed(2))
+    : 0;
 
-    const lateArrivalRate = totalRecords > 0
-      ? Number((lateArrivals / totalRecords * 100).toFixed(2))
-      : 0;
+  const lateArrivalRate = totalRecords > 0
+    ? Number((lateArrivals / totalRecords * 100).toFixed(2))
+    : 0;
 
-    const earlyDepartureRate = totalRecords > 0
-      ? Number((earlyDepartures / totalRecords * 100).toFixed(2))
-      : 0;
+  const earlyDepartureRate = totalRecords > 0
+    ? Number((earlyDepartures / totalRecords * 100).toFixed(2))
+    : 0;
 
-    return {
-      totalRecords,
-      byStatus: {
-        present,
-        absent,
-        checkedIn,
-        halfDay,
-        permission,
-        notCheckedIn: totalRecords - (present + absent + checkedIn + halfDay + permission),
-      },
-      byEntryType: {
-        manualEntries,
-        autoEntries,
-        manualPercentage: totalRecords > 0 ? Number((manualEntries / totalRecords * 100).toFixed(2)) : 0,
-      },
-      timing: {
-        lateArrivals,
-        earlyDepartures,
-        lateArrivalRate,
-        earlyDepartureRate,
-      },
-      averages: {
-        averageWorkHours,
-        attendanceRate,
-      },
-      percentages: {
-        presentRate: totalRecords > 0 ? Number((present / totalRecords * 100).toFixed(2)) : 0,
-        absentRate: totalRecords > 0 ? Number((absent / totalRecords * 100).toFixed(2)) : 0,
-      },
-    };
-  }
+  const holidayRate = totalRecords > 0
+    ? Number((holiday / totalRecords * 100).toFixed(2))
+    : 0;
+
+  return {
+    totalRecords,
+    byStatus: {
+      present,
+      absent,
+      checkedIn,
+      halfDay,
+      permission,
+      holiday, // Add holiday to byStatus
+      notCheckedIn: totalRecords - (present + absent + checkedIn + halfDay + permission + holiday),
+    },
+    byEntryType: {
+      manualEntries,
+      autoEntries,
+      manualPercentage: totalRecords > 0 ? Number((manualEntries / totalRecords * 100).toFixed(2)) : 0,
+    },
+    timing: {
+      lateArrivals,
+      earlyDepartures,
+      lateArrivalRate,
+      earlyDepartureRate,
+    },
+    averages: {
+      averageWorkHours,
+      attendanceRate,
+    },
+    percentages: {
+      presentRate: totalRecords > 0 ? Number((present / totalRecords * 100).toFixed(2)) : 0,
+      absentRate: totalRecords > 0 ? Number((absent / totalRecords * 100).toFixed(2)) : 0,
+      holidayRate, // Add holiday rate
+    },
+  };
+}
 
   private groupByDepartment(data: any[]) {
     const groups: { [key: string]: any[] } = {};
@@ -4176,282 +4376,285 @@ export class AttendanceService {
     }
   }
 
-async getAllAttendanceWithFilters(filters: {
-  startDate?: string;
-  endDate?: string;
-  name?: string;
-  employeeId?: string;
-  status?: string;
-  month?: string;
-  year?: string;
-  date?: string;
-  department?: string;
-  designation?: string;
-  manualEntry?: string;
-  page?: number;
-  limit?: number;
-  sortBy?: string;
-  sortOrder?: 'asc' | 'desc';
-}) {
-  try {
-    const supa = this.supabase.getAdminClient();
+  async getAllAttendanceWithFilters(filters: {
+    startDate?: string;
+    endDate?: string;
+    name?: string;
+    employeeId?: string;
+    status?: string;
+    month?: string;
+    year?: string;
+    date?: string;
+    department?: string;
+    designation?: string;
+    manualEntry?: string;
+    page?: number;
+    limit?: number;
+    sortBy?: string;
+    sortOrder?: 'asc' | 'desc';
+  }) {
+    try {
+      const supa = this.supabase.getAdminClient();
 
-    // First, get all active users based on filters
-    let userQuery = supa
-      .from('users')
-      .select('id, name, email, employee_id, designation, department, profile_url, role')
-      .eq('role', 'user'); // Only regular users, not admins
+      // First, get all active users based on filters
+      let userQuery = supa
+        .from('users')
+        .select('id, name, email, employee_id, designation, department, profile_url, role')
+        .eq('role', 'user'); // Only regular users, not admins
 
-    // Apply user filters
-    if (filters.name) {
-      userQuery = userQuery.ilike('name', `%${filters.name}%`);
-    }
-    if (filters.employeeId) {
-      userQuery = userQuery.eq('employee_id', filters.employeeId);
-    }
-    if (filters.department) {
-      userQuery = userQuery.ilike('department', `%${filters.department}%`);
-    }
-    if (filters.designation) {
-      userQuery = userQuery.ilike('designation', `%${filters.designation}%`);
-    }
-
-    const { data: users, error: usersError } = await userQuery;
-
-    if (usersError) {
-      console.error('Error fetching users:', usersError);
-      throw new InternalServerErrorException('Failed to fetch users data');
-    }
-
-    // Calculate date range
-    let startDate: string, endDate: string;
-    
-    if (filters.date) {
-      // Single date
-      const date = new Date(filters.date);
-      if (isNaN(date.getTime())) {
-        throw new BadRequestException('Invalid date format');
+      // Apply user filters
+      if (filters.name) {
+        userQuery = userQuery.ilike('name', `%${filters.name}%`);
       }
-      startDate = filters.date;
-      endDate = filters.date;
-    } else if (filters.startDate && filters.endDate) {
-      // Date range
-      startDate = filters.startDate;
-      endDate = filters.endDate;
-    } else if (filters.month && filters.year) {
-      // Month/Year
-      const month = filters.month.padStart(2, '0');
-      const year = filters.year;
-      startDate = `${year}-${month}-01`;
-      const lastDay = new Date(parseInt(year), parseInt(month), 0).getDate();
-      endDate = `${year}-${month}-${lastDay}`;
-    } else if (filters.month) {
-      // Current year with specified month
-      const currentYear = new Date().getFullYear();
-      const month = filters.month.padStart(2, '0');
-      startDate = `${currentYear}-${month}-01`;
-      const lastDay = new Date(currentYear, parseInt(month), 0).getDate();
-      endDate = `${currentYear}-${month}-${lastDay}`;
-    } else if (filters.year) {
-      // Whole year
-      const year = filters.year;
-      startDate = `${year}-01-01`;
-      endDate = `${year}-12-31`;
-    } else {
-      // Default: current month
-      const currentDate = new Date();
-      const currentYear = currentDate.getFullYear();
-      const currentMonth = String(currentDate.getMonth() + 1).padStart(2, '0');
-      startDate = `${currentYear}-${currentMonth}-01`;
-      const lastDay = new Date(currentYear, parseInt(currentMonth), 0).getDate();
-      endDate = `${currentYear}-${currentMonth}-${lastDay}`;
-    }
+      if (filters.employeeId) {
+        userQuery = userQuery.eq('employee_id', filters.employeeId);
+      }
+      if (filters.department) {
+        userQuery = userQuery.ilike('department', `%${filters.department}%`);
+      }
+      if (filters.designation) {
+        userQuery = userQuery.ilike('designation', `%${filters.designation}%`);
+      }
 
-    // Generate all dates in the range
-    const allDates = this.generateDateRange(startDate, endDate);
-    
-    // Get attendance records for the date range
-    const { data: attendanceRecords, error: attendanceError } = await supa
-      .from('attendance')
-      .select('*')
-      .in('user_id', users.map(u => u.id))
-      .gte('date', startDate)
-      .lte('date', endDate);
+      const { data: users, error: usersError } = await userQuery;
 
-    if (attendanceError) {
-      console.error('Error fetching attendance:', attendanceError);
+      if (usersError) {
+        console.error('Error fetching users:', usersError);
+        throw new InternalServerErrorException('Failed to fetch users data');
+      }
+
+      // Calculate date range
+      let startDate: string, endDate: string;
+
+      if (filters.date) {
+        // Single date
+        const date = new Date(filters.date);
+        if (isNaN(date.getTime())) {
+          throw new BadRequestException('Invalid date format');
+        }
+        startDate = filters.date;
+        endDate = filters.date;
+      } else if (filters.startDate && filters.endDate) {
+        // Date range
+        startDate = filters.startDate;
+        endDate = filters.endDate;
+      } else if (filters.month && filters.year) {
+        // Month/Year
+        const month = filters.month.padStart(2, '0');
+        const year = filters.year;
+        startDate = `${year}-${month}-01`;
+        const lastDay = new Date(parseInt(year), parseInt(month), 0).getDate();
+        endDate = `${year}-${month}-${lastDay}`;
+      } else if (filters.month) {
+        // Current year with specified month
+        const currentYear = new Date().getFullYear();
+        const month = filters.month.padStart(2, '0');
+        startDate = `${currentYear}-${month}-01`;
+        const lastDay = new Date(currentYear, parseInt(month), 0).getDate();
+        endDate = `${currentYear}-${month}-${lastDay}`;
+      } else if (filters.year) {
+        // Whole year
+        const year = filters.year;
+        startDate = `${year}-01-01`;
+        endDate = `${year}-12-31`;
+      } else {
+        // Default: current month
+        const currentDate = new Date();
+        const currentYear = currentDate.getFullYear();
+        const currentMonth = String(currentDate.getMonth() + 1).padStart(2, '0');
+        startDate = `${currentYear}-${currentMonth}-01`;
+        const lastDay = new Date(currentYear, parseInt(currentMonth), 0).getDate();
+        endDate = `${currentYear}-${currentMonth}-${lastDay}`;
+      }
+
+      // Generate all dates in the range
+      const allDates = this.generateDateRange(startDate, endDate);
+
+      // Get attendance records for the date range
+      const { data: attendanceRecords, error: attendanceError } = await supa
+        .from('attendance')
+        .select('*')
+        .in('user_id', users.map(u => u.id))
+        .gte('date', startDate)
+        .lte('date', endDate);
+
+      if (attendanceError) {
+        console.error('Error fetching attendance:', attendanceError);
+        throw new InternalServerErrorException('Failed to fetch attendance data');
+      }
+
+      // Create a map for quick lookup of attendance records
+      const attendanceMap = new Map();
+      attendanceRecords.forEach(record => {
+        const key = `${record.user_id}_${record.date}`;
+        attendanceMap.set(key, record);
+      });
+
+      // Generate attendance data for all users and all dates
+      const allAttendanceData: any[] = [];
+
+      users.forEach(user => {
+        allDates.forEach(date => {
+          const key = `${user.id}_${date}`;
+          const attendanceRecord = attendanceMap.get(key);
+
+          // In getAllAttendanceWithFilters method, when creating the default "Not Marked" record:
+          if (!attendanceRecord) {
+            // No record exists for this user on this date
+            // Create a default "Not Marked" record (for UI)
+            allAttendanceData.push({
+              id: null,
+              user_id: user.id,
+              date: date,
+              check_in: null,
+              check_out: null,
+              check_in_ist: null,
+              check_out_ist: null,
+              total_time_minutes: null,
+              total_time_formatted: null,
+              is_absent: false,
+              absence_reason: null,
+              manual_entry: false,
+              status: 'Not Marked', // For UI
+              status_code: 'not-marked',
+              is_holiday: true, // Add this flag to identify holidays
+              updated_at: null,
+              user_info: {
+                id: user.id,
+                name: user.name,
+                email: user.email,
+                employee_id: user.employee_id,
+                designation: user.designation,
+                department: user.department,
+                profile_url: user.profile_url,
+                role: user.role
+              }
+            });
+          } else {
+            // No record exists for this user on this date
+            // Create a default "Not Marked" record
+            allAttendanceData.push({
+              id: null,
+              user_id: user.id,
+              date: date,
+              check_in: null,
+              check_out: null,
+              check_in_ist: null,
+              check_out_ist: null,
+              total_time_minutes: null,
+              total_time_formatted: null,
+              is_absent: false,
+              absence_reason: null,
+              manual_entry: false,
+              status: 'Not Marked',
+              status_code: 'not-marked',
+              updated_at: null,
+              user_info: {
+                id: user.id,
+                name: user.name,
+                email: user.email,
+                employee_id: user.employee_id,
+                designation: user.designation,
+                department: user.department,
+                profile_url: user.profile_url,
+                role: user.role
+              }
+            });
+          }
+        });
+      });
+
+      // Apply status filter if provided
+      let filteredData = allAttendanceData;
+      if (filters.status) {
+        const statusLower = filters.status.toLowerCase();
+        filteredData = allAttendanceData.filter(record => {
+          return record.status_code === statusLower;
+        });
+      }
+
+      // Apply manual entry filter
+      if (filters.manualEntry !== undefined) {
+        const isManual = filters.manualEntry === 'true';
+        filteredData = filteredData.filter(record => record.manual_entry === isManual);
+      }
+
+      // Apply sorting
+      const sortField = filters.sortBy || 'date';
+      const sortDirection = filters.sortOrder || 'asc';
+
+      filteredData.sort((a, b) => {
+        let aValue, bValue;
+
+        switch (sortField) {
+          case 'name':
+            aValue = a.user_info.name?.toLowerCase() || '';
+            bValue = b.user_info.name?.toLowerCase() || '';
+            break;
+          case 'check_in':
+            aValue = a.check_in ? new Date(a.check_in).getTime() : 0;
+            bValue = b.check_in ? new Date(b.check_in).getTime() : 0;
+            break;
+          case 'check_out':
+            aValue = a.check_out ? new Date(a.check_out).getTime() : 0;
+            bValue = b.check_out ? new Date(b.check_out).getTime() : 0;
+            break;
+          case 'total_time_minutes':
+            aValue = a.total_time_minutes || 0;
+            bValue = b.total_time_minutes || 0;
+            break;
+          case 'date':
+          default:
+            aValue = a.date;
+            bValue = b.date;
+            break;
+        }
+
+        if (aValue < bValue) return sortDirection === 'asc' ? -1 : 1;
+        if (aValue > bValue) return sortDirection === 'asc' ? 1 : -1;
+        return 0;
+      });
+
+      // Calculate summary statistics
+      const summary = this.calculateAttendanceSummary(allAttendanceData);
+
+      return {
+        data: filteredData, // Return ALL filtered data without pagination
+        pagination: null, // No pagination when limit is removed
+        filters: {
+          ...filters,
+          applied_filters: Object.keys(filters).filter(key => filters[key] !== undefined && key !== 'page' && key !== 'limit' && key !== 'sortBy' && key !== 'sortOrder')
+        },
+        summary
+      };
+    } catch (err) {
+      console.error('getAllAttendanceWithFilters error:', err);
+      if (err instanceof BadRequestException) throw err;
       throw new InternalServerErrorException('Failed to fetch attendance data');
     }
+  }
 
-    // Create a map for quick lookup of attendance records
-    const attendanceMap = new Map();
-    attendanceRecords.forEach(record => {
-      const key = `${record.user_id}_${record.date}`;
-      attendanceMap.set(key, record);
-    });
+  // Helper method to generate date range
+  private generateDateRange(startDate: string, endDate: string): string[] {
+    const dates: string[] = [];
+    const start = new Date(startDate);
+    const end = new Date(endDate);
 
-    // Generate attendance data for all users and all dates
-    const allAttendanceData: any[] = [];
-
-    users.forEach(user => {
-      allDates.forEach(date => {
-        const key = `${user.id}_${date}`;
-        const attendanceRecord = attendanceMap.get(key);
-
-        if (attendanceRecord) {
-          // Record exists
-          const status = this.getDetailedStatus(attendanceRecord);
-          
-          allAttendanceData.push({
-            id: attendanceRecord.id,
-            user_id: user.id,
-            date: date,
-            check_in: attendanceRecord.check_in,
-            check_out: attendanceRecord.check_out,
-            check_in_ist: this.toIST(attendanceRecord.check_in),
-            check_out_ist: this.toIST(attendanceRecord.check_out),
-            total_time_minutes: attendanceRecord.total_time_minutes,
-            total_time_formatted: attendanceRecord.check_in && attendanceRecord.check_out
-              ? this.formatDuration(attendanceRecord.check_in, attendanceRecord.check_out)
-              : (attendanceRecord.is_absent ? '00:00:00' : null),
-            is_absent: attendanceRecord.is_absent,
-            absence_reason: attendanceRecord.absence_reason,
-            manual_entry: attendanceRecord.manual_entry || false,
-            status: status.label,
-            status_code: status.code,
-            updated_at: attendanceRecord.updated_at,
-            user_info: {
-              id: user.id,
-              name: user.name,
-              email: user.email,
-              employee_id: user.employee_id,
-              designation: user.designation,
-              department: user.department,
-              profile_url: user.profile_url,
-              role: user.role
-            }
-          });
-        } else {
-          // No record exists for this user on this date
-          // Create a default "Not Marked" record
-          allAttendanceData.push({
-            id: null,
-            user_id: user.id,
-            date: date,
-            check_in: null,
-            check_out: null,
-            check_in_ist: null,
-            check_out_ist: null,
-            total_time_minutes: null,
-            total_time_formatted: null,
-            is_absent: false,
-            absence_reason: null,
-            manual_entry: false,
-            status: 'Not Marked',
-            status_code: 'not-marked',
-            updated_at: null,
-            user_info: {
-              id: user.id,
-              name: user.name,
-              email: user.email,
-              employee_id: user.employee_id,
-              designation: user.designation,
-              department: user.department,
-              profile_url: user.profile_url,
-              role: user.role
-            }
-          });
-        }
-      });
-    });
-
-    // Apply status filter if provided
-    let filteredData = allAttendanceData;
-    if (filters.status) {
-      const statusLower = filters.status.toLowerCase();
-      filteredData = allAttendanceData.filter(record => {
-        return record.status_code === statusLower;
-      });
+    let current = new Date(start);
+    while (current <= end) {
+      dates.push(current.toISOString().split('T')[0]);
+      current.setDate(current.getDate() + 1);
     }
 
-    // Apply manual entry filter
-    if (filters.manualEntry !== undefined) {
-      const isManual = filters.manualEntry === 'true';
-      filteredData = filteredData.filter(record => record.manual_entry === isManual);
-    }
-
-    // Apply sorting
-    const sortField = filters.sortBy || 'date';
-    const sortDirection = filters.sortOrder || 'asc';
-    
-    filteredData.sort((a, b) => {
-      let aValue, bValue;
-      
-      switch (sortField) {
-        case 'name':
-          aValue = a.user_info.name?.toLowerCase() || '';
-          bValue = b.user_info.name?.toLowerCase() || '';
-          break;
-        case 'check_in':
-          aValue = a.check_in ? new Date(a.check_in).getTime() : 0;
-          bValue = b.check_in ? new Date(b.check_in).getTime() : 0;
-          break;
-        case 'check_out':
-          aValue = a.check_out ? new Date(a.check_out).getTime() : 0;
-          bValue = b.check_out ? new Date(b.check_out).getTime() : 0;
-          break;
-        case 'total_time_minutes':
-          aValue = a.total_time_minutes || 0;
-          bValue = b.total_time_minutes || 0;
-          break;
-        case 'date':
-        default:
-          aValue = a.date;
-          bValue = b.date;
-          break;
-      }
-      
-      if (aValue < bValue) return sortDirection === 'asc' ? -1 : 1;
-      if (aValue > bValue) return sortDirection === 'asc' ? 1 : -1;
-      return 0;
-    });
-
-    // Calculate summary statistics
-    const summary = this.calculateAttendanceSummary(allAttendanceData);
-
-    return {
-      data: filteredData, // Return ALL filtered data without pagination
-      pagination: null, // No pagination when limit is removed
-      filters: {
-        ...filters,
-        applied_filters: Object.keys(filters).filter(key => filters[key] !== undefined && key !== 'page' && key !== 'limit' && key !== 'sortBy' && key !== 'sortOrder')
-      },
-      summary
-    };
-  } catch (err) {
-    console.error('getAllAttendanceWithFilters error:', err);
-    if (err instanceof BadRequestException) throw err;
-    throw new InternalServerErrorException('Failed to fetch attendance data');
+    return dates;
   }
-}
 
-// Helper method to generate date range
-private generateDateRange(startDate: string, endDate: string): string[] {
-  const dates: string[] = [];
-  const start = new Date(startDate);
-  const end = new Date(endDate);
-  
-  let current = new Date(start);
-  while (current <= end) {
-    dates.push(current.toISOString().split('T')[0]);
-    current.setDate(current.getDate() + 1);
-  }
-  
-  return dates;
-}
-
-// Update getDetailedStatus to include "Not Marked"
 private getDetailedStatus(record: any): { label: string, code: string } {
+  // Check for holiday FIRST using the database flag
+  if (record.is_holiday) {
+    return { label: 'Holiday', code: 'holiday' };
+  }
+  
   if (record.is_absent) {
     return { label: 'Absent', code: 'absent' };
   }
@@ -4469,7 +4672,15 @@ private getDetailedStatus(record: any): { label: string, code: string } {
     return { label: 'Present', code: 'present' };
   }
 
-  if (!record.check_in && !record.is_absent) {
+  if (record.permission_time) {
+    return { label: 'Permission', code: 'permission' };
+  }
+
+  if (record.half_day_type) {
+    return { label: `Half Day (${record.half_day_type})`, code: 'half-day' };
+  }
+
+  if (!record.check_in && !record.is_absent && !record.is_holiday) {
     return { label: 'Not Marked', code: 'not-marked' };
   }
 
@@ -4478,31 +4689,31 @@ private getDetailedStatus(record: any): { label: string, code: string } {
 
 
   // Calculate summary statistics
-private calculateAttendanceSummary(data: any[]) {
-  const total = data.length;
-  const present = data.filter(d => d.status_code === 'present').length;
-  const absent = data.filter(d => d.status_code === 'absent').length;
-  const checkedIn = data.filter(d => d.status_code === 'checked-in').length;
-  const notMarked = data.filter(d => d.status_code === 'not-marked').length;
-  const halfDays = data.filter(d => d.status_code === 'half-day').length;
+  private calculateAttendanceSummary(data: any[]) {
+    const total = data.length;
+    const present = data.filter(d => d.status_code === 'present').length;
+    const absent = data.filter(d => d.status_code === 'absent').length;
+    const checkedIn = data.filter(d => d.status_code === 'checked-in').length;
+    const notMarked = data.filter(d => d.status_code === 'not-marked').length;
+    const halfDays = data.filter(d => d.status_code === 'half-day').length;
 
-  // Calculate average work hours from present records
-  const presentRecords = data.filter(d => d.status_code === 'present');
-  const avgWorkHours = presentRecords.length > 0
-    ? Number((presentRecords.reduce((sum, d) => sum + (d.total_time_minutes || 0), 0) / presentRecords.length / 60).toFixed(2))
-    : 0;
+    // Calculate average work hours from present records
+    const presentRecords = data.filter(d => d.status_code === 'present');
+    const avgWorkHours = presentRecords.length > 0
+      ? Number((presentRecords.reduce((sum, d) => sum + (d.total_time_minutes || 0), 0) / presentRecords.length / 60).toFixed(2))
+      : 0;
 
-  return {
-    total,
-    present,
-    absent,
-    checked_in: checkedIn,
-    not_marked: notMarked,
-    half_days: halfDays,
-    average_work_hours: avgWorkHours,
-    percentage_present: total > 0 ? Number(((present / total) * 100).toFixed(2)) : 0
-  };
-}
+    return {
+      total,
+      present,
+      absent,
+      checked_in: checkedIn,
+      not_marked: notMarked,
+      half_days: halfDays,
+      average_work_hours: avgWorkHours,
+      percentage_present: total > 0 ? Number(((present / total) * 100).toFixed(2)) : 0
+    };
+  }
   // Get monthly attendance report
   async getMonthlyReport(year?: string, month?: string, department?: string) {
     try {
